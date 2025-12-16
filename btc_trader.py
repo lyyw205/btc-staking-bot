@@ -191,6 +191,72 @@ class BTCStackingTrader:
             f"{extra}",
         )
 
+    def maybe_initial_market_entry(self):
+        """
+        실행 직후 1회성으로 (기본 70%)를 시장가 매수.
+        - 중복 실행 방지: btc_settings.init_entry_done 사용
+        - pool(30% 운용분)과 분리하고 싶으면 clientOrderId prefix를 BTCSTACK_가 아닌 값으로 둠
+        """
+        if not self._cfg("initial_buy_on_start", False):
+            return
+
+        # 이미 한 번 했으면 스킵
+        if self.db.get_setting("init_entry_done", None) == "1":
+            return
+
+        quote_asset = self._cfg("quote_asset", "USDT")
+        ratio = float(self._cfg("initial_buy_ratio", 0.70))
+        reserve_buffer = float(self._cfg("usdt_reserve_buffer", 2.0))
+
+        # 기준 총액: 고정 ref가 있으면 ref를, 없으면 현재 total
+        bal = self.client.get_balance(quote_asset)
+        free_usdt = float(bal.get("free", 0.0) or 0.0)
+        total_usdt_now = float(bal.get("total", 0.0) or 0.0)
+
+        base_total = total_usdt_now
+        if self._cfg("use_fixed_usdt_reference", True):
+            ref = self.db.get_setting("usdt_ref_total", None)
+            try:
+                ref_f = float(ref) if ref is not None and str(ref) != "" else 0.0
+            except Exception:
+                ref_f = 0.0
+            if ref_f > 0:
+                base_total = ref_f
+
+        target_buy = max(0.0, base_total * ratio)
+
+        # 실제로는 free에서만 지출 가능 + 버퍼 제외
+        spendable = max(0.0, free_usdt - reserve_buffer)
+        buy_usdt = min(target_buy, spendable)
+
+        # 최소 주문금액 체크
+        filters = self.client.get_symbol_filters(self.cfg.symbol)
+        min_notional = max(filters.min_notional, self.cfg.min_trade_usdt)
+        if buy_usdt < min_notional:
+            self.db.log("WARN", f"INIT BUY skipped: buy_usdt({buy_usdt:.2f}) < min_notional({min_notional:.2f})")
+            return
+
+        # 너무 자주 주문 방지(실수 방지)
+        if not self._cooldown_ok():
+            return
+
+        try:
+            # ✅ pool과 분리: clientOrderId prefix를 BTCSTACK_가 아닌 값으로 둠
+            # pool에 포함시키고 싶으면 client_oid="BTCSTACK_INIT_..." 로 바꿔도 됨
+            client_oid = f"BTCINIT_{int(self._now()*1000)}"
+            o = self.client.place_market_buy_by_quote(
+                quote_usdt=buy_usdt,
+                symbol=self.cfg.symbol,
+                client_oid=client_oid,
+            )
+            self.db.upsert_order(o)
+            self._touch_order()
+
+            self.db.set_setting("init_entry_done", "1")
+            self.db.log("INFO", f"INIT BUY done: quote={buy_usdt:.2f} ({ratio*100:.0f}% of base_total={base_total:.2f})")
+        except Exception as e:
+            self.db.log("ERROR", f"INIT BUY failed: {e}")
+
     # -----------------------------
     # Sync: orders + fills + position
     # -----------------------------
@@ -624,6 +690,9 @@ class BTCStackingTrader:
 
     def run_forever(self):
         self.db.log("INFO", "BTCStackingTrader start")
+
+        self.maybe_initial_market_entry()
+        
         while True:
             try:
                 self.step()

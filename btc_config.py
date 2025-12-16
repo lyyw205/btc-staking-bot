@@ -94,3 +94,7 @@ class BTCConfig:
     cash_reserve_ratio: float = float(os.getenv("BTC_CASH_RESERVE_RATIO", "0.70"))  # 고정 보유(70%)
     usdt_reserve_buffer: float = float(os.getenv("BTC_USDT_RESERVE_BUFFER", "2.0"))  # 주문 실패 방지용 소액 버퍼
     use_fixed_usdt_reference: bool = os.getenv("BTC_USE_FIXED_USDT_REFERENCE", "true").lower() == "true"
+
+    # ---- Initial entry (one-shot) ----
+    initial_buy_on_start: bool = os.getenv("BTC_INITIAL_BUY_ON_START", "false").lower() == "true"
+    initial_buy_ratio: float = float(os.getenv("BTC_INITIAL_BUY_RATIO", "0.70"))  # 기본 70%
