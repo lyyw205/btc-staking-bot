@@ -4,19 +4,10 @@ import psycopg2
 import pandas as pd
 from dotenv import load_dotenv
 from urllib.parse import quote_plus
-from dataclasses import fields, is_dataclass, replace
-
-from btc_config import BTCConfig
-from backtest import run_backtest
 
 
-def safe_replace(cfg, **kwargs):
-    # BTCConfig가 frozen/dataclass여도, 실제 필드만 골라 replace
-    if not is_dataclass(cfg):
-        return cfg
-    allowed = {f.name for f in fields(cfg)}
-    filtered = {k: v for k, v in kwargs.items() if k in allowed}
-    return replace(cfg, **filtered)
+from backtest_config import BTCBacktestConfig
+from back_test import run_backtest
 
 
 def build_db_url_from_env() -> str:
@@ -29,7 +20,7 @@ def build_db_url_from_env() -> str:
     if not all([host, name, user, pw, port]):
         raise RuntimeError("BTC_DB_HOST/NAME/USER/PASS/PORT 중 비어있는 값이 있어")
 
-    pw_enc = quote_plus(pw)  # 특수문자 인코딩
+    pw_enc = quote_plus(pw)
     return f"postgresql://{user}:{pw_enc}@{host}:{port}/{name}?sslmode=require"
 
 
@@ -75,42 +66,31 @@ if __name__ == "__main__":
     # DB URL: SUPABASE_DB_URL 있으면 그거, 없으면 BTC_DB_*로 조립
     db_url = os.getenv("SUPABASE_DB_URL", "").strip() or build_db_url_from_env()
 
-    # ✅ cfg는 frozen일 수 있으니 safe_replace로 “존재하는 필드만” 반영
-    cfg0 = BTCConfig()
-    cfg = safe_replace(
-        cfg0,
-        symbol="BTCUSDT",
-        ai_enable_report=False,  # 있으면 적용, 없으면 무시
-        quote_asset="USDT",
-        base_asset="BTC",
-    )
+    # ✅ 백테스트 config는 backtest_config.py에서 관리
+    cfg = BTCBacktestConfig()  # 또는 BTCBacktestConfig.from_env()
 
     df = load_ohlcv_from_supabase(
         db_url=db_url,
         region="BI",
-        symbol="BTCUSDT",
+        symbol=cfg.symbol,
         interval="5m",
-        start=None,  # 예: "2024-01-01"
-        end=None,    # 예: "2025-01-01"
+        start=None,
+        end=None,
         limit=None,
     )
 
     if df.empty:
         raise RuntimeError("ohlcv_data에서 데이터가 안 나왔어 (region/symbol/interval 확인)")
 
-    equity, summary = run_backtest(
-        df,
-        init_usdt=1000.0,
-        cfg=cfg,
-        slippage_bps=1.0,
-        fee_bps_taker=10.0,
-        fee_bps_maker=2.0,
-    )
+    equity, summary = run_backtest(df, cfg=cfg)
 
     equity.to_csv("backtest_equity.csv", index=False)
 
     print("\n=== BACKTEST SUMMARY ===")
-    print("- initial: USDT=1000, BTC=0")
+    print(f"- grid buys count:         {int(summary.get('grid_buy_count', 0))}")
+    print(f"- grid buys spent total:   {float(summary.get('grid_buy_spent_total', 0.0)):.2f} USDT")
+    print(f"- sells count:             {int(summary.get('sell_count', 0))}")
+    print(f"- initial: USDT={cfg.init_usdt}, BTC={cfg.init_btc}")
     print(f"- stacking period: {summary['first_buy_dt']}  ~  {summary['end_dt']}")
     print(f"- BTC start(after first buy): {summary['btc_start_after_first_buy']:.8f}")
     print(f"- BTC end:               {summary['btc_end']:.8f}")
@@ -119,6 +99,18 @@ if __name__ == "__main__":
         print(f"- BTC delta %:           {summary['btc_delta_pct']:.2f}%")
     print(f"- equity_end_usdt:       {summary['equity_end_usdt']:.2f}")
     print(f"- btc_equiv_end:         {summary['btc_equiv_end']:.8f}")
+
+    print(f"- total_deposit(incl topups): {summary.get('deposit_total', 0.0):.2f}")
+    print(f"- topup_total:               {summary.get('topup_total', 0.0):.2f}")
+    print(f"- fee_total:                {summary.get('fee_total', 0.0):.2f}")
+    print(f"- btc_start_init:           {summary.get('btc_start_init', 0.0):.8f}")
+    print(f"- btc_end:                  {summary['btc_end']:.8f}")
+
+    stats = summary.get("stats") or {}
+    print(f"- market buys:              {int(stats.get('market_buy_orders', 0))}")
+    print(f"- TP limit fills:           {int(stats.get('tp_limit_fills', 0))}")
+    print(f"- cancels:                  {int(stats.get('cancels', 0))}")
+
 
     stats = summary.get("stats") or {}
     if stats:

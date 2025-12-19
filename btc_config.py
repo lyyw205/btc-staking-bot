@@ -53,7 +53,7 @@ class BTCConfig:
         )
 
     # ---- Strategy (Stacking/Grid) ----
-    grid_step_pct: float = float(os.getenv("BTC_GRID_STEP_PCT", "0.008"))
+    grid_step_pct: float = float(os.getenv("BTC_GRID_STEP_PCT", "0.01"))
     take_profit_pct: float = float(os.getenv("BTC_TAKE_PROFIT_PCT", "0.010"))
     buy_quote_usdt: float = float(os.getenv("BTC_BUY_QUOTE_USDT", "25.0"))
     sell_fraction_on_tp: float = float(os.getenv("BTC_SELL_FRACTION_ON_TP", "0.15"))
@@ -81,6 +81,11 @@ class BTCConfig:
     # ---- Base price recentering ----
     recenter_threshold_pct: float = float(os.getenv("BTC_RECENTER_THRESHOLD_PCT", "0.020"))
     recenter_cooldown_sec: int = int(os.getenv("BTC_RECENTER_COOLDOWN_SEC", "60"))
+
+    # ---- Crash-aware sizing ----
+    crash_drop_pct: float = float(os.getenv("BTC_CRASH_DROP_PCT", "0.035"))
+    crash_vol_threshold: float = float(os.getenv("BTC_CRASH_VOL_THRESHOLD", "0.015"))
+    crash_grid_mult: float = float(os.getenv("BTC_CRASH_GRID_MULT", "2.0"))
 
     # ---- Loop ----
     loop_interval_sec: int = int(os.getenv("BTC_LOOP_INTERVAL_SEC", "60"))
