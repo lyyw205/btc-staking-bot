@@ -1,2 +1,4 @@
 .env
-.env.*
+.env.*artifacts/
+/.venv/
+backtest_equity.csv

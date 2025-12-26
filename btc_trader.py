@@ -43,8 +43,10 @@ class BTCStackingTrader:
         self._last_recenter_ts = 0.0
         self._last_tp_refresh_ts = 0.0
         self._last_cap_log_ts = 0.0
+        self._last_override_log_ts = 0.0
         self._crash_active = False
         self._price_hist: List[float] = []
+        self._dashboard_overrides: dict[str, float | int | bool] = {}
 
         # base_price 초기화
         if self.db.get_setting("base_price") is None:
@@ -62,6 +64,21 @@ class BTCStackingTrader:
             "take_profit_pct": float(self.cfg.take_profit_pct),
             "tp_refresh_sec": int(self.cfg.tp_refresh_sec),
             "recenter_threshold_pct": float(self.cfg.recenter_threshold_pct),
+            "buy_quote_usdt": float(self.cfg.buy_quote_usdt),
+            "sell_fraction_on_tp": float(self.cfg.sell_fraction_on_tp),
+            "min_trade_usdt": float(self.cfg.min_trade_usdt),
+            "use_tp_limit_orders": bool(self.cfg.use_tp_limit_orders),
+            "trailing_sell_enable": bool(self.cfg.trailing_sell_enable),
+            "trailing_activate_pct": float(self.cfg.trailing_activate_pct),
+            "trailing_ratio": float(self.cfg.trailing_ratio),
+            "dynamic_buy": bool(self.cfg.dynamic_buy),
+            "buy_min_usdt": float(self.cfg.buy_min_usdt),
+            "buy_max_usdt": float(self.cfg.buy_max_usdt),
+            "recenter_cooldown_sec": int(self.cfg.recenter_cooldown_sec),
+            "crash_drop_pct": float(self.cfg.crash_drop_pct),
+            "loop_interval_sec": int(self.cfg.loop_interval_sec),
+            "trade_cap_ratio": float(self.cfg.trade_cap_ratio),
+            "verbose": bool(self.cfg.verbose),
         }
 
     # -----------------------------
@@ -81,17 +98,311 @@ class BTCStackingTrader:
         return getattr(self.cfg, key, default)
 
     def _apply_tune(self, tune):
-        self._rt_params["grid_step_pct"] = float(tune.grid_step_pct)
-        self._rt_params["take_profit_pct"] = float(tune.take_profit_pct)
-        self._rt_params["tp_refresh_sec"] = int(tune.tp_refresh_sec)
-        self._rt_params["recenter_threshold_pct"] = float(tune.recenter_threshold_pct)
+        if "grid_step_pct" not in self._dashboard_overrides:
+            self._rt_params["grid_step_pct"] = float(tune.grid_step_pct)
+        if "take_profit_pct" not in self._dashboard_overrides:
+            self._rt_params["take_profit_pct"] = float(tune.take_profit_pct)
+        if "tp_refresh_sec" not in self._dashboard_overrides:
+            self._rt_params["tp_refresh_sec"] = int(tune.tp_refresh_sec)
+        if "recenter_threshold_pct" not in self._dashboard_overrides:
+            self._rt_params["recenter_threshold_pct"] = float(tune.recenter_threshold_pct)
+
+    def _refresh_dashboard_overrides(self):
+        overrides = {
+            "grid_step_pct": float,
+            "take_profit_pct": float,
+            "buy_quote_usdt": float,
+            "tp_refresh_sec": int,
+            "sell_fraction_on_tp": float,
+            "min_trade_usdt": float,
+            "use_tp_limit_orders": bool,
+            "trailing_sell_enable": bool,
+            "trailing_activate_pct": float,
+            "trailing_ratio": float,
+            "dynamic_buy": bool,
+            "buy_min_usdt": float,
+            "buy_max_usdt": float,
+            "recenter_threshold_pct": float,
+            "recenter_cooldown_sec": int,
+            "crash_drop_pct": float,
+            "loop_interval_sec": int,
+            "trade_cap_ratio": float,
+            "verbose": bool,
+        }
+        bool_true = {"1", "true", "yes", "on"}
+        bool_false = {"0", "false", "no", "off"}
+        updated = False
+        for key, caster in overrides.items():
+            raw = self.db.get_setting(f"tune.{key}", None)
+            if raw is None or str(raw).strip() == "":
+                if key in self._dashboard_overrides:
+                    self._dashboard_overrides.pop(key, None)
+                    self._rt_params[key] = getattr(self.cfg, key)
+                    if key == "verbose":
+                        self.db.verbose = bool(self._rt_params[key])
+                    updated = True
+                continue
+
+            try:
+                if caster is bool:
+                    if isinstance(raw, bool):
+                        val = raw
+                    else:
+                        s = str(raw).strip().lower()
+                        if s in bool_true:
+                            val = True
+                        elif s in bool_false:
+                            val = False
+                        else:
+                            raise ValueError("invalid bool")
+                else:
+                    val = caster(raw)
+            except Exception:
+                continue
+
+            prev = self._dashboard_overrides.get(key)
+            if prev != val:
+                self._dashboard_overrides[key] = val
+                self._rt_params[key] = val
+                if key == "verbose":
+                    self.db.verbose = bool(val)
+                updated = True
+
+        if updated and (self._now() - self._last_override_log_ts) > 10:
+            keys = ", ".join(sorted(self._dashboard_overrides.keys())) or "none"
+            self.db.log("INFO", f"dashboard overrides updated: {keys}")
+            self._last_override_log_ts = self._now()
+
+    def _get_float_setting(self, key: str, default: float = 0.0) -> float:
+        raw = self.db.get_setting(key, None)
+        if raw is None or str(raw).strip() == "":
+            return float(default)
+        try:
+            return float(raw)
+        except Exception:
+            return float(default)
+
+    def _get_int_setting(self, key: str, default: int = 0) -> int:
+        raw = self.db.get_setting(key, None)
+        if raw is None or str(raw).strip() == "":
+            return int(default)
+        try:
+            return int(float(raw))
+        except Exception:
+            return int(default)
+
+    def _update_profit_tracker(self, trades: List[dict]):
+        if not trades:
+            return
+
+        quote_asset = self._cfg("quote_asset", "USDT")
+        last_trade_id = self._get_int_setting("profit_last_trade_id", 0)
+        qty = self._get_float_setting("profit_tracker_qty", 0.0)
+        cost = self._get_float_setting("profit_tracker_cost", 0.0)
+        realized = self._get_float_setting("profit_realized_usdt", 0.0)
+        pool = self._get_float_setting("profit_pool_usdt", 0.0)
+
+        def _trade_key(t: dict) -> tuple[int, int]:
+            return (int(t.get("time") or 0), int(t.get("id") or 0))
+
+        new_trades = [t for t in trades if int(t.get("id") or 0) > last_trade_id]
+        if not new_trades and last_trade_id > 0:
+            return
+
+        for t in sorted(new_trades or trades, key=_trade_key):
+            trade_id = int(t.get("id") or 0)
+            if last_trade_id > 0 and trade_id <= last_trade_id:
+                continue
+
+            price = float(t.get("price") or 0.0)
+            qty_f = float(t.get("qty") or 0.0)
+            quote_qty = float(t.get("quoteQty") or (price * qty_f))
+            is_buyer = bool(t.get("isBuyer"))
+            commission = float(t.get("commission") or 0.0)
+            commission_asset = t.get("commissionAsset")
+
+            if qty_f <= 0:
+                last_trade_id = max(last_trade_id, trade_id)
+                continue
+
+            if is_buyer:
+                qty += qty_f
+                cost += quote_qty
+            else:
+                if qty <= 1e-12:
+                    last_trade_id = max(last_trade_id, trade_id)
+                    continue
+                avg = cost / qty if qty > 0 else 0.0
+                sold = min(qty, qty_f)
+                gross = price * sold
+                fee_quote = commission if str(commission_asset) == str(quote_asset) else 0.0
+                profit = (price - avg) * sold - fee_quote
+                realized += profit
+                pool += profit
+
+                qty -= sold
+                cost -= avg * sold
+                if qty <= 1e-12:
+                    qty = 0.0
+                    cost = 0.0
+
+            last_trade_id = max(last_trade_id, trade_id)
+
+        self.db.set_setting("profit_last_trade_id", last_trade_id)
+        self.db.set_setting("profit_tracker_qty", qty)
+        self.db.set_setting("profit_tracker_cost", cost)
+        self.db.set_setting("profit_realized_usdt", realized)
+        self.db.set_setting("profit_pool_usdt", pool)
+
+    def _apply_profit_pool_to_reserve(self, order: dict):
+        quote_asset = self._cfg("quote_asset", "USDT")
+        min_trade = float(self._p("min_trade_usdt", float(self._cfg("min_trade_usdt", 0.0))))
+        pool = self._get_float_setting("profit_pool_usdt", 0.0)
+        if pool < min_trade:
+            return
+
+        try:
+            spent = float(order.get("cummulativeQuoteQty") or 0.0)
+            qty = float(order.get("executedQty") or order.get("origQty") or 0.0)
+        except Exception:
+            return
+
+        if spent <= 0 or qty <= 0:
+            return
+
+        use = min(pool, spent)
+        if use < min_trade:
+            return
+
+        reserve_add = qty * (use / spent)
+        reserve_add = self.client.adjust_qty(reserve_add, self.cfg.symbol)
+        if reserve_add <= 0:
+            return
+
+        reserve_qty = self._get_reserve_btc_qty()
+        self._set_reserve_btc_qty(reserve_qty + reserve_add)
+        reserve_cost = self._get_reserve_cost_usdt()
+        self._set_reserve_cost_usdt(reserve_cost + use)
+        self.db.set_setting("profit_pool_usdt", pool - use)
+        total_core_btc = self._get_float_setting("profit_core_added_btc_total", 0.0)
+        total_core_usdt = self._get_float_setting("profit_core_added_usdt_total", 0.0)
+        self.db.set_setting("profit_core_added_btc_total", total_core_btc + reserve_add)
+        self.db.set_setting("profit_core_added_usdt_total", total_core_usdt + use)
+        self.db.set_setting("profit_core_added_btc_last", reserve_add)
+        self.db.set_setting("profit_core_added_usdt_last", use)
+        self.db.log(
+            "INFO",
+            f"profit compounding -> reserve +{reserve_add:.8f} BTC (used {use:.2f} {quote_asset})",
+        )
+
+    # -----------------------------
+    # Trailing sell (TP alternative)
+    # -----------------------------
+    def _trail_key(self, suffix: str) -> str:
+        return f"trail_{suffix}"
+
+    def _get_trail_active(self) -> bool:
+        v = self.db.get_setting(self._trail_key("active"), "")
+        return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+    def _set_trail_active(self, active: bool):
+        self.db.set_setting(self._trail_key("active"), "1" if active else "0")
+
+    def _get_trail_high(self) -> float:
+        return self._get_float_setting(self._trail_key("high_price"), 0.0)
+
+    def _set_trail_high(self, price: float):
+        self.db.set_setting(self._trail_key("high_price"), float(price))
+
+    def _reset_trailing_state(self):
+        self._set_trail_active(False)
+        self._set_trail_high(0.0)
+
+    def maybe_trailing_sell(self, cur_price: float, pos_pool: PositionSnapshot):
+        if not bool(self._p("trailing_sell_enable", False)):
+            return
+
+        if not self._cooldown_ok():
+            return
+
+        if pos_pool.btc_qty <= 1e-12 or pos_pool.avg_entry <= 0:
+            self._reset_trailing_state()
+            return
+
+        avg_entry = float(pos_pool.avg_entry)
+        cur_gain = (cur_price - avg_entry) / avg_entry
+        activate_pct = float(self._p("trailing_activate_pct", 0.02))
+        ratio = float(self._p("trailing_ratio", 0.70))
+
+        if not self._get_trail_active():
+            if cur_gain >= activate_pct:
+                self._set_trail_active(True)
+                self._set_trail_high(cur_price)
+                self.db.log(
+                    "INFO",
+                    f"TRAIL active: avg={avg_entry:.2f} price={cur_price:.2f} gain={cur_gain*100:.2f}% activate={activate_pct*100:.2f}%",
+                )
+            return
+
+        high_price = max(self._get_trail_high(), cur_price)
+        if high_price != self._get_trail_high():
+            self._set_trail_high(high_price)
+            high_gain = (high_price - avg_entry) / avg_entry if avg_entry > 0 else 0.0
+            self.db.log(
+                "INFO",
+                f"TRAIL high update: high={high_price:.2f} high_gain={high_gain*100:.2f}%",
+            )
+
+        high_gain = (high_price - avg_entry) / avg_entry if avg_entry > 0 else 0.0
+        if high_gain < activate_pct:
+            return
+
+        trigger_gain = high_gain * ratio
+        if cur_gain > trigger_gain or cur_gain < 0:
+            return
+
+        reserve_qty = self._get_reserve_btc_qty()
+        sellable = max(0.0, float(pos_pool.btc_qty) - float(reserve_qty))
+        qty = sellable * float(self._p("sell_fraction_on_tp", self.cfg.sell_fraction_on_tp))
+        qty = self.client.adjust_qty(qty, self.cfg.symbol)
+        if qty <= 0:
+            return
+
+        notional = qty * cur_price
+        filters = self.client.get_symbol_filters(self.cfg.symbol)
+        min_notional = max(filters.min_notional, float(self._p("min_trade_usdt", float(self._cfg("min_trade_usdt", 0.0)))))
+        if notional < min_notional:
+            return
+
+        try:
+            self.db.log(
+                "INFO",
+                (
+                    f"TRAIL trigger: cur_gain={cur_gain*100:.2f}% "
+                    f"high_gain={high_gain*100:.2f}% trigger={trigger_gain*100:.2f}% "
+                    f"qty={qty:.8f}"
+                ),
+            )
+            o = self.client.place_limit_sell(qty_base=qty, price=cur_price, symbol=self.cfg.symbol)
+            self.db.upsert_order(o)
+            self._touch_order()
+            self.db.log(
+                "INFO",
+                (
+                    f"TRAIL SELL set: price={cur_price:.2f} qty={qty:.8f} "
+                    f"gain={cur_gain*100:.2f}% high_gain={high_gain*100:.2f}%"
+                ),
+            )
+            self._reset_trailing_state()
+        except Exception as e:
+            self.db.log("ERROR", f"TRAIL SELL place failed: {e}")
 
     def _crash_adjustments(self, base: float, cur_price: float, vol: float) -> float:
         if base <= 0:
             return 1.0
 
         drop_pct = max(0.0, (base - cur_price) / base)
-        drop_thr = float(self._cfg("crash_drop_pct", 0.0))
+        drop_thr = float(self._p("crash_drop_pct", float(self._cfg("crash_drop_pct", 0.0))))
         vol_thr = float(self._cfg("crash_vol_threshold", 0.0))
 
         crash_active = drop_pct >= drop_thr and vol >= vol_thr
@@ -144,7 +455,7 @@ class BTCStackingTrader:
     # -----------------------------
     def _get_trade_cap_snapshot(self, pos: PositionSnapshot) -> dict:
         quote_asset = self._cfg("quote_asset", "USDT")
-        trade_cap_ratio = float(self._cfg("trade_cap_ratio", 0.30))
+        trade_cap_ratio = float(self._p("trade_cap_ratio", float(self._cfg("trade_cap_ratio", 0.30))))
         reserve_buffer = float(self._cfg("usdt_reserve_buffer", 2.0))
 
         bal = self.client.get_balance(quote_asset)
@@ -173,7 +484,9 @@ class BTCStackingTrader:
             base_total = total_usdt_now
 
         trade_cap = max(0.0, base_total * trade_cap_ratio)
-        used = max(0.0, float(pos.cost_basis_usdt))
+        used_total = max(0.0, float(pos.cost_basis_usdt))
+        reserve_cost = self._get_reserve_cost_usdt()
+        used = max(0.0, used_total - reserve_cost)
         remaining_cap = max(0.0, trade_cap - used)
         spendable_free = max(0.0, free_usdt - reserve_buffer)
 
@@ -229,7 +542,7 @@ class BTCStackingTrader:
 
         # 최소 주문금액 체크
         filters = self.client.get_symbol_filters(self.cfg.symbol)
-        min_notional = max(float(filters.min_notional), float(self._cfg("min_trade_usdt", 0.0)))
+        min_notional = max(float(filters.min_notional), float(self._p("min_trade_usdt", float(self._cfg("min_trade_usdt", 0.0)))))
         if buy_usdt < min_notional:
             self.db.log("WARN", f"INIT BUY skipped: buy_usdt({buy_usdt:.2f}) < min_notional({min_notional:.2f})")
             return
@@ -258,16 +571,24 @@ class BTCStackingTrader:
                     bought_qty = float(o.get("executedQty") or o.get("origQty") or 0.0)
                 except Exception:
                     bought_qty = 0.0
+                try:
+                    spent_usdt = float(o.get("cummulativeQuoteQty") or 0.0)
+                except Exception:
+                    spent_usdt = 0.0
 
                 reserve_qty = max(0.0, bought_qty * reserve_ratio)
                 reserve_qty = self.client.adjust_qty(reserve_qty, self.cfg.symbol)
                 self._set_reserve_btc_qty(reserve_qty)
+                if spent_usdt <= 0:
+                    spent_usdt = buy_usdt
+                self._set_reserve_cost_usdt(spent_usdt * reserve_ratio)
 
                 self.db.log(
                     "INFO",
                     f"RESERVE set: reserve_btc_qty={reserve_qty:.8f} "
                     f"(ratio={reserve_ratio:.2f} of initial buy qty={bought_qty:.8f})"
                 )
+            self._apply_profit_pool_to_reserve(o)
 
             self.db.set_setting("init_entry_done", "1")
             self.db.log("INFO", f"INIT BUY done: quote={buy_usdt:.2f} {quote_asset}")
@@ -316,11 +637,12 @@ class BTCStackingTrader:
                         self.db.log("WARN", f"get_order(for trade) failed: order_id={oid} err={e}")
 
                 self.db.insert_fill(order_id=oid, t=t)
+            self._update_profit_tracker(trades)
         except Exception as e:
             self.db.log("WARN", f"get_my_trades failed: {e}")
 
         snap = self.db.recompute_position_from_fills(symbol=self.cfg.symbol)
-        if self.cfg.verbose:
+        if self._p("verbose", self.cfg.verbose):
             self.db.log("INFO", f"position -> {asdict(snap)}")
 
         # ✅ pool prefix는 cfg에서
@@ -347,7 +669,7 @@ class BTCStackingTrader:
             return
 
         now = self._now()
-        if now - self._last_recenter_ts < int(self._cfg("recenter_cooldown_sec", 60)):
+        if now - self._last_recenter_ts < int(self._p("recenter_cooldown_sec", int(self._cfg("recenter_cooldown_sec", 60)))):
             return
 
         diff = abs(cur_price - base) / base
@@ -391,7 +713,7 @@ class BTCStackingTrader:
         return math.sqrt(var)
 
     def compute_dynamic_buy_usdt(self, pos: PositionSnapshot) -> float:
-        base_buy = float(self._cfg("buy_quote_usdt", 25.0))
+        base_buy = float(self._p("buy_quote_usdt", 25.0))
 
         exposure = max(0.0, float(pos.cost_basis_usdt))
         cap = float(self._cfg("max_quote_exposure_usdt", 500.0))
@@ -415,8 +737,8 @@ class BTCStackingTrader:
             vol_factor = vol_boost_max + (vol_cut_min - vol_boost_max) * t
 
         buy_usdt = base_buy * exposure_factor * vol_factor
-        buy_min = float(self._cfg("buy_min_usdt", 10.0))
-        buy_max = float(self._cfg("buy_max_usdt", 60.0))
+        buy_min = float(self._p("buy_min_usdt", float(self._cfg("buy_min_usdt", 10.0))))
+        buy_max = float(self._p("buy_max_usdt", float(self._cfg("buy_max_usdt", 60.0))))
         buy_usdt = max(buy_min, min(buy_max, buy_usdt))
         return float(buy_usdt)
 
@@ -457,12 +779,12 @@ class BTCStackingTrader:
         reserve_qty = self._get_reserve_btc_qty()
         sellable = max(0.0, float(pos.btc_qty) - float(reserve_qty))
 
-        qty = sellable * float(self.cfg.sell_fraction_on_tp)
+        qty = sellable * float(self._p("sell_fraction_on_tp", self.cfg.sell_fraction_on_tp))
         qty = self.client.adjust_qty(qty, self.cfg.symbol)
         return tp_price, qty
 
     def ensure_tp_limit_order(self, cur_price: float, pos_pool: PositionSnapshot, pos_all: Optional[PositionSnapshot] = None, gate=None):
-        if not bool(self._cfg("use_tp_limit_orders", True)):
+        if not bool(self._p("use_tp_limit_orders", bool(self._cfg("use_tp_limit_orders", True)))):
             return
 
         if gate is not None and getattr(gate, "allow_tp_refresh", True) is False:
@@ -505,7 +827,7 @@ class BTCStackingTrader:
 
         notional = tp_qty * tp_price
         filters = self.client.get_symbol_filters(self.cfg.symbol)
-        min_notional = max(filters.min_notional, float(self._cfg("min_trade_usdt", 0.0)))
+        min_notional = max(filters.min_notional, float(self._p("min_trade_usdt", float(self._cfg("min_trade_usdt", 0.0)))))
         if notional < min_notional:
             if tp_oid is not None:
                 try:
@@ -568,12 +890,15 @@ class BTCStackingTrader:
             return
 
         filters = self.client.get_symbol_filters(self.cfg.symbol)
-        min_notional = max(filters.min_notional, float(self._cfg("min_trade_usdt", 0.0)))
+        min_notional = max(filters.min_notional, float(self._p("min_trade_usdt", float(self._cfg("min_trade_usdt", 0.0)))))
 
         # ✅ AI gate
         if gate is not None and not getattr(gate, "allow_buy", True):
             self.db.log("INFO", f"BUY blocked by AI gate: regime={gate.regime} notes={gate.notes}")
             return
+
+        cap = self._get_trade_cap_snapshot(pos_pool)
+        spendable_free = float(cap["spendable_free"])
 
         # =========================
         # ✅ 고정매수 모드 (25USDT 고정, 쪼개지 않음)
@@ -585,22 +910,14 @@ class BTCStackingTrader:
             if buy_usdt < min_notional:
                 self.db.log("WARN", f"fixed buy_usdt({buy_usdt:.2f}) < min_notional({min_notional:.2f})")
                 return
-
-            quote_asset = getattr(self.cfg, "quote_asset", "USDT")
-            bal = self.client.get_balance(quote_asset)
-            free_usdt = float(bal.get("free", 0.0) or 0.0)
-
-            reserve_buffer = float(getattr(self.cfg, "usdt_reserve_buffer", 0.0))
-            spendable = max(0.0, free_usdt - reserve_buffer)
-
-            # ✅ free 부족하면 "쪼개지 말고" 그냥 스킵
-            if spendable + 1e-12 < buy_usdt:
+            if spendable_free + 1e-12 < buy_usdt:
                 return
 
             try:
                 o = self.client.place_market_buy_by_quote(quote_usdt=buy_usdt, symbol=self.cfg.symbol)
                 self.db.upsert_order(o)
                 self._touch_order()
+                self._apply_profit_pool_to_reserve(o)
                 self.db.log("INFO", f"BUY(FIXED) quote={buy_usdt:.2f} | base={base:.2f} trig={trigger:.2f} cur={cur_price:.2f}")
                 self.set_base_price(cur_price)
             except Exception as e:
@@ -610,8 +927,9 @@ class BTCStackingTrader:
         # =========================
         # (고정매수 아닌 경우) 기존 로직 유지
         # =========================
-        dynamic_buy = bool(self._cfg("dynamic_buy", True))
-        buy_usdt = self.compute_dynamic_buy_usdt(pos_pool) if dynamic_buy else float(self._cfg("buy_quote_usdt", 25.0))
+        dynamic_buy = bool(self._p("dynamic_buy", bool(self._cfg("dynamic_buy", True))))
+        buy_usdt = self.compute_dynamic_buy_usdt(pos_pool) if dynamic_buy else float(self._p("buy_quote_usdt", 25.0))
+        buy_usdt = min(buy_usdt, spendable_free)
 
         if buy_usdt < min_notional:
             self.db.log("WARN", f"buy_usdt too small ({buy_usdt:.2f}) < min_notional({min_notional:.2f})")
@@ -621,6 +939,7 @@ class BTCStackingTrader:
             o = self.client.place_market_buy_by_quote(quote_usdt=buy_usdt, symbol=self.cfg.symbol)
             self.db.upsert_order(o)
             self._touch_order()
+            self._apply_profit_pool_to_reserve(o)
             self.db.log("INFO", f"BUY quote={buy_usdt:.2f} | base={base:.2f} trig={trigger:.2f} cur={cur_price:.2f}")
             self.set_base_price(cur_price)
         except Exception as e:
@@ -645,6 +964,20 @@ class BTCStackingTrader:
         except Exception:
             qty = 0.0
         self.db.set_setting(self._reserve_key(), qty)
+
+    def _get_reserve_cost_usdt(self) -> float:
+        v = self.db.get_setting("reserve_cost_usdt", 0.0)
+        try:
+            return float(v) if v is not None and str(v) != "" else 0.0
+        except Exception:
+            return 0.0
+
+    def _set_reserve_cost_usdt(self, cost: float):
+        try:
+            cost = float(cost)
+        except Exception:
+            cost = 0.0
+        self.db.set_setting("reserve_cost_usdt", cost)
     # -----------------------------
     # Main loop
     # -----------------------------
@@ -653,6 +986,7 @@ class BTCStackingTrader:
 
         cur_price = self.client.get_price(self.cfg.symbol)
         self._update_price_history(cur_price)
+        self._refresh_dashboard_overrides()
 
         pos_all = self.db.get_position(self.cfg.symbol)
         pos_pool = self.db.get_pool_position(self.cfg.symbol)
@@ -706,8 +1040,19 @@ class BTCStackingTrader:
         report = self.ai.maybe_make_report(state, gate, tune) if self.cfg.ai_enable_report else None
         self.maybe_recenter_base_price(cur_price)
 
-        # ✅ 전체 포지션(pos_all)을 같이 넘겨야 keep_btc_ratio_on_tp 캡이 정확히 먹음
-        self.ensure_tp_limit_order(cur_price, pos_pool, pos_all=pos_all, gate=gate)
+        trailing_on = bool(self._p("trailing_sell_enable", False))
+        if trailing_on:
+            tp_oid = self._get_tp_order_id()
+            if tp_oid is not None:
+                try:
+                    self.client.cancel_order(tp_oid, self.cfg.symbol)
+                except Exception:
+                    pass
+                self._set_tp_order_id(None)
+            self.maybe_trailing_sell(cur_price, pos_pool)
+        else:
+            # ✅ 전체 포지션(pos_all)을 같이 넘겨야 keep_btc_ratio_on_tp 캡이 정확히 먹음
+            self.ensure_tp_limit_order(cur_price, pos_pool, pos_all=pos_all, gate=gate)
         self.maybe_buy_on_drop(cur_price, pos_pool, gate=gate)
 
     def run_forever(self):
@@ -719,7 +1064,7 @@ class BTCStackingTrader:
                 self.step()
             except Exception as e:
                 self.db.log("ERROR", f"loop error: {e}")
-            time.sleep(int(self._cfg("loop_interval_sec", 60)))
+            time.sleep(int(self._p("loop_interval_sec", int(self._cfg("loop_interval_sec", 60)))))
 
 
 if __name__ == "__main__":

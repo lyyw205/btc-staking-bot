@@ -63,6 +63,9 @@ class BTCConfig:
     use_tp_limit_orders: bool = os.getenv("BTC_USE_TP_LIMIT_ORDERS", "true").lower() == "true"
     tp_refresh_sec: int = int(os.getenv("BTC_TP_REFRESH_SEC", "30"))
     tp_price_bump_ticks: int = int(os.getenv("BTC_TP_PRICE_BUMP_TICKS", "0"))
+    trailing_sell_enable: bool = os.getenv("BTC_TRAILING_SELL_ENABLE", "false").lower() == "true"
+    trailing_activate_pct: float = float(os.getenv("BTC_TRAILING_ACTIVATE_PCT", "0.02"))
+    trailing_ratio: float = float(os.getenv("BTC_TRAILING_RATIO", "0.70"))
 
     # ---- Dynamic Buy Sizing (v2.1) ----
     dynamic_buy: bool = os.getenv("BTC_DYNAMIC_BUY", "true").lower() == "true"
@@ -96,10 +99,10 @@ class BTCConfig:
 
     # ---- Capital split (USDT) ----
     trade_cap_ratio: float = float(os.getenv("BTC_TRADE_CAP_RATIO", "0.30"))  # 운용 비율(30%)
-    cash_reserve_ratio: float = float(os.getenv("BTC_CASH_RESERVE_RATIO", "0.70"))  # 고정 보유(70%)
     usdt_reserve_buffer: float = float(os.getenv("BTC_USDT_RESERVE_BUFFER", "2.0"))  # 주문 실패 방지용 소액 버퍼
     use_fixed_usdt_reference: bool = os.getenv("BTC_USE_FIXED_USDT_REFERENCE", "true").lower() == "true"
 
     # ---- Initial entry (one-shot) ----
     initial_buy_on_start: bool = os.getenv("BTC_INITIAL_BUY_ON_START", "false").lower() == "true"
     initial_buy_ratio: float = float(os.getenv("BTC_INITIAL_BUY_RATIO", "0.70"))  # 기본 70%
+    initial_reserve_ratio: float = float(os.getenv("BTC_INITIAL_RESERVE_RATIO", "0.70"))  # 초기 매수분 중 코어 비율
