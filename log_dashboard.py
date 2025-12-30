@@ -25,6 +25,9 @@ SERVICE_NAME = "btc-stacking-bot"  # journalctl -u <service>
 # "거래 관련"으로 보고 싶은 키워드(너 로그 스타일에 맞춰 추가/삭제 가능)
 TRADE_RE = re.compile(r"\b(BUY|SELL|LONG|SHORT|ENTRY|EXIT|TP|SL)\b", re.IGNORECASE)
 
+# "설정 변경"으로 보고 싶은 키워드
+TUNE_RE = re.compile(r"\b(TUNE|tune\.|dashboard overrides updated)\b", re.IGNORECASE)
+
 # "에러"로 보고 싶은 키워드
 ERROR_RE = re.compile(
     r"(ERROR|Traceback|Exception|ModuleNotFoundError|Failed with result|status=\d+/FAILURE)",
@@ -357,6 +360,7 @@ HTML = """
           <select id="mode">
             <option value="all">All</option>
             <option value="trade">BUY/SELL only</option>
+            <option value="tune">Settings</option>
             <option value="error">Errors only</option>
           </select>
         </label>
@@ -709,6 +713,8 @@ def _journalctl(lines: int) -> str:
 def _tag_line(s: str) -> str:
     if ERROR_RE.search(s):
         return "error"
+    if TUNE_RE.search(s):
+        return "tune"
     if TRADE_RE.search(s):
         return "trade"
     return "normal"
@@ -731,6 +737,8 @@ def api_logs():
         tag = _tag_line(r)
 
         if mode == "trade" and tag != "trade":
+            continue
+        if mode == "tune" and tag != "tune":
             continue
         if mode == "error" and tag != "error":
             continue

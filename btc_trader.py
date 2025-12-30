@@ -132,14 +132,18 @@ class BTCStackingTrader:
         bool_true = {"1", "true", "yes", "on"}
         bool_false = {"0", "false", "no", "off"}
         updated = False
+        changed: dict[str, tuple[float | int | bool | None, float | int | bool]] = {}
+        cleared: dict[str, float | int | bool] = {}
         for key, caster in overrides.items():
             raw = self.db.get_setting(f"tune.{key}", None)
             if raw is None or str(raw).strip() == "":
                 if key in self._dashboard_overrides:
-                    self._dashboard_overrides.pop(key, None)
+                    prev = self._dashboard_overrides.pop(key, None)
                     self._rt_params[key] = getattr(self.cfg, key)
                     if key == "verbose":
                         self.db.verbose = bool(self._rt_params[key])
+                    if prev is not None:
+                        cleared[key] = prev
                     updated = True
                 continue
 
@@ -166,11 +170,22 @@ class BTCStackingTrader:
                 self._rt_params[key] = val
                 if key == "verbose":
                     self.db.verbose = bool(val)
+                changed[key] = (prev, val)
                 updated = True
 
         if updated and (self._now() - self._last_override_log_ts) > 10:
             keys = ", ".join(sorted(self._dashboard_overrides.keys())) or "none"
-            self.db.log("INFO", f"dashboard overrides updated: {keys}")
+            parts = []
+            if changed:
+                changes = ", ".join(
+                    f"{k}: {prev} -> {val}" for k, (prev, val) in sorted(changed.items())
+                )
+                parts.append(f"set {changes}")
+            if cleared:
+                cleared_desc = ", ".join(f"{k}: {v} -> default" for k, v in sorted(cleared.items()))
+                parts.append(f"cleared {cleared_desc}")
+            detail = " | ".join(parts) if parts else "no detail"
+            self.db.log("INFO", f"TUNE update: {detail} | active={keys}")
             self._last_override_log_ts = self._now()
 
     def _get_float_setting(self, key: str, default: float = 0.0) -> float:
@@ -318,6 +333,22 @@ class BTCStackingTrader:
         self._set_trail_active(False)
         self._set_trail_high(0.0)
 
+    def _place_limit_sell(self, *, qty: float, price: float, symbol: str, client_oid: str | None = None):
+        try:
+            return self.client.place_limit_sell(
+                qty_base=qty,
+                price=price,
+                symbol=symbol,
+                client_oid=client_oid,
+            )
+        except TypeError:
+            return self.client.place_limit_sell(
+                qty_base=qty,
+                price=price,
+                symbol=symbol,
+                clientOrderId=client_oid,
+            )
+
     def maybe_trailing_sell(self, cur_price: float, pos_pool: PositionSnapshot):
         if not bool(self._p("trailing_sell_enable", False)):
             return
@@ -383,7 +414,9 @@ class BTCStackingTrader:
                     f"qty={qty:.8f}"
                 ),
             )
-            o = self.client.place_limit_sell(qty_base=qty, price=cur_price, symbol=self.cfg.symbol)
+            prefix = str(getattr(self.cfg, "client_order_prefix", "BTCSTACK_"))
+            client_oid = f"{prefix}TRAIL_{int(self._now()*1000)}"
+            o = self._place_limit_sell(qty=qty, price=cur_price, symbol=self.cfg.symbol, client_oid=client_oid)
             self.db.upsert_order(o)
             self._touch_order()
             self.db.log(

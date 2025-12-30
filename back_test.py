@@ -33,8 +33,8 @@ class BTCBacktestConfig:
     init_btc: float = 0.0
     initial_buy_on_start: bool = True
     initial_buy_ratio: float = 0.70
-    initial_buy_usdt: float = 1000.0
-    initial_entry_usdt: float = 0.0
+    initial_buy_usdt: Optional[float] = None
+    initial_entry_usdt: Optional[float] = None
     initial_reserve_ratio: float = 0.50
     reserve_btc_key: str = "reserve_btc_qty"
 
@@ -133,8 +133,8 @@ class BTCBacktestConfig:
             init_btc=f("INIT_BTC", cls.init_btc),
             initial_buy_on_start=b("INITIAL_BUY_ON_START", cls.initial_buy_on_start),
             initial_buy_ratio=f("INITIAL_BUY_RATIO", cls.initial_buy_ratio),
-            initial_buy_usdt=f("INITIAL_BUY_USDT", cls.initial_buy_usdt),
-            initial_entry_usdt=f("INITIAL_ENTRY_USDT", cls.initial_entry_usdt),
+            initial_buy_usdt=f("INITIAL_BUY_USDT", cls.initial_buy_usdt) if os.getenv("BT_INITIAL_BUY_USDT") is not None else None,
+            initial_entry_usdt=f("INITIAL_ENTRY_USDT", cls.initial_entry_usdt) if os.getenv("BT_INITIAL_ENTRY_USDT") is not None else None,
             initial_reserve_ratio=f("INITIAL_RESERVE_RATIO", cls.initial_reserve_ratio),
             reserve_btc_key=s("RESERVE_BTC_KEY", cls.reserve_btc_key),
 
@@ -639,6 +639,11 @@ class BacktestDB:
         rec = dict(t)
         rec["orderId"] = int(order_id)
         self._fills.append(rec)
+        o = self._orders.get(int(order_id)) or {}
+        cid = (o.get("clientOrderId") or "")
+        if "TRAIL" in str(cid):
+            side = "BUY" if bool(rec.get("isBuyer")) else "SELL"
+            self.log("INFO", f"TRAIL fill: side={side} qty={rec.get('qty')} price={rec.get('price')}")
 
     # ----------------------------
     # ai events
@@ -695,6 +700,65 @@ class BacktestDB:
                     avg = cost / qty
 
         return PositionSnapshot(symbol=symbol, btc_qty=float(qty), avg_entry=float(avg), cost_basis_usdt=float(cost))
+
+    def compute_trailing_stats(self, symbol: str, tag: str = "TRAIL") -> Dict[str, float]:
+        qty = 0.0
+        cost = 0.0
+        profits: List[float] = []
+
+        def _trade_key(t: Dict[str, Any]) -> tuple[int, int]:
+            return (int(t.get("time") or 0), int(t.get("id") or 0))
+
+        for f in sorted(self._fills, key=_trade_key):
+            if f.get("symbol") != symbol:
+                continue
+            is_buyer = bool(f.get("isBuyer"))
+            f_qty = float(f.get("qty") or 0.0)
+            f_quote = float(f.get("quoteQty") or 0.0)
+            if f_qty <= 0:
+                continue
+
+            if is_buyer:
+                qty += f_qty
+                cost += f_quote
+                continue
+
+            if qty <= 1e-12:
+                continue
+
+            avg = cost / qty if qty > 0 else 0.0
+            sold = min(qty, f_qty)
+            profit = f_quote - (avg * sold)
+
+            oid = int(f.get("orderId") or 0)
+            o = self._orders.get(oid) or {}
+            cid = (o.get("clientOrderId") or "")
+            if tag in str(cid):
+                profits.append(profit)
+
+            cost -= avg * sold
+            qty -= sold
+            if qty <= 1e-12:
+                qty = 0.0
+                cost = 0.0
+
+        count = float(len(profits))
+        total = float(sum(profits)) if profits else 0.0
+        avg_profit = float(total / count) if count > 0 else 0.0
+        wins = [p for p in profits if p > 0]
+        losses = [p for p in profits if p < 0]
+        win_rate = float(len(wins) / count) if count > 0 else 0.0
+        avg_win = float(sum(wins) / len(wins)) if wins else 0.0
+        avg_loss = float(sum(losses) / len(losses)) if losses else 0.0
+
+        return {
+            "trailing_sell_count": count,
+            "trailing_profit_total": total,
+            "trailing_profit_avg": avg_profit,
+            "trailing_win_rate": win_rate,
+            "trailing_win_avg": avg_win,
+            "trailing_loss_avg": avg_loss,
+        }
 
     def recompute_position_from_fills(self, symbol: str) -> PositionSnapshot:
         snap = self._recompute_position(symbol, client_prefix=None)
@@ -809,15 +873,17 @@ def run_backtest(df: pd.DataFrame, *, cfg: BTCBacktestConfig) -> Tuple[pd.DataFr
     sell_count = int(stats.get("tp_limit_fills", 0))
 
     # 마지막 종가/지표들
+    first_close = float(out["close"].iloc[0])
     last_close = float(out["close"].iloc[-1])
-    btc_start = float(btc_at_first_buy or 0.0)
-    btc_end = float(out["btc_total"].iloc[-1])
+    btc_start = (float(cfg.init_usdt) / first_close + float(cfg.init_btc)) if first_close > 0 else 0.0
     equity_end_usdt = float(out["equity_usdt"].iloc[-1])
+    btc_end = (equity_end_usdt / last_close) if last_close > 0 else 0.0
 
     btc_delta = btc_end - btc_start
     btc_delta_pct = (btc_delta / btc_start * 100.0) if btc_start > 0 else None
-    btc_equiv_end = (equity_end_usdt / last_close) if last_close > 0 else 0.0
+    btc_equiv_end = btc_end
 
+    trailing_stats = db.compute_trailing_stats(cfg.symbol)
     summary = {
         "first_buy_dt": str(first_buy_dt) if first_buy_dt is not None else None,
         "end_dt": str(out["dt"].iloc[-1]),
@@ -833,10 +899,11 @@ def run_backtest(df: pd.DataFrame, *, cfg: BTCBacktestConfig) -> Tuple[pd.DataFr
         "grid_buy_spent_total": float(grid_buy_spent_total),
         "sell_count": int(sell_count),
 
-        "btc_start_after_first_buy": btc_start,
+        "btc_start_after_first_buy": float(btc_at_first_buy or 0.0),
         "btc_delta": float(btc_delta),
         "btc_delta_pct": btc_delta_pct,
         "btc_equiv_end": float(btc_equiv_end),
+        **trailing_stats,
 
         "trades": {
             "market_buys": int(stats.get("market_buy_orders", 0)),
@@ -845,4 +912,6 @@ def run_backtest(df: pd.DataFrame, *, cfg: BTCBacktestConfig) -> Tuple[pd.DataFr
             "cancels": int(stats.get("cancels", 0)),
         },
     }
+    for k, v in trailing_stats.items():
+        out[k] = v
     return out, summary
