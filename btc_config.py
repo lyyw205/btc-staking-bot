@@ -85,6 +85,14 @@ class BTCConfig:
     recenter_threshold_pct: float = float(os.getenv("BTC_RECENTER_THRESHOLD_PCT", "0.020"))
     recenter_cooldown_sec: int = int(os.getenv("BTC_RECENTER_COOLDOWN_SEC", "60"))
 
+    # ---- Simple recenter grid (fixed buy/sell) ----
+    simple_recenter_mode: bool = os.getenv("BTC_SIMPLE_RECENTER_MODE", "true").lower() == "true"
+    simple_recenter_pct: float = float(os.getenv("BTC_SIMPLE_RECENTER_PCT", "0.010"))
+    simple_recenter_buy_pct: float = float(os.getenv("BTC_SIMPLE_RECENTER_BUY_PCT", "0.010"))
+    simple_recenter_sell_pct: float = float(os.getenv("BTC_SIMPLE_RECENTER_SELL_PCT", "0.015"))
+    simple_recenter_buy_usdt: float = float(os.getenv("BTC_SIMPLE_RECENTER_BUY_USDT", "50.0"))
+    simple_recenter_sell_usdt: float = float(os.getenv("BTC_SIMPLE_RECENTER_SELL_USDT", "50.0"))
+
     # ---- Crash-aware sizing ----
     crash_drop_pct: float = float(os.getenv("BTC_CRASH_DROP_PCT", "0.035"))
     crash_vol_threshold: float = float(os.getenv("BTC_CRASH_VOL_THRESHOLD", "0.015"))
@@ -103,6 +111,7 @@ class BTCConfig:
     use_fixed_usdt_reference: bool = os.getenv("BTC_USE_FIXED_USDT_REFERENCE", "true").lower() == "true"
 
     # ---- Initial entry (one-shot) ----
-    initial_buy_on_start: bool = os.getenv("BTC_INITIAL_BUY_ON_START", "false").lower() == "true"
-    initial_buy_ratio: float = float(os.getenv("BTC_INITIAL_BUY_RATIO", "0.70"))  # 기본 70%
-    initial_reserve_ratio: float = float(os.getenv("BTC_INITIAL_RESERVE_RATIO", "0.70"))  # 초기 매수분 중 코어 비율
+    initial_buy_on_start: bool = os.getenv("BTC_INITIAL_BUY_ON_START", "true").lower() == "true"
+    initial_buy_usdt: float | None = float(os.getenv("BTC_INITIAL_BUY_USDT")) if os.getenv("BTC_INITIAL_BUY_USDT") else None
+    initial_buy_ratio: float = float(os.getenv("BTC_INITIAL_BUY_RATIO", "0.30"))  # 기본 30%
+    initial_reserve_ratio: float = float(os.getenv("BTC_INITIAL_RESERVE_RATIO", "0.80"))  # 초기 매수분 중 코어 비율

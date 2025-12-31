@@ -168,33 +168,45 @@ if __name__ == "__main__":
     equity.to_csv(out_path, index=False)
 
     print("\n=== BACKTEST SUMMARY ===")
-    print(f"- grid buys count:         {int(summary.get('grid_buy_count', 0))}")
-    print(f"- grid buys spent total:   {float(summary.get('grid_buy_spent_total', 0.0)):.2f} USDT")
-    print(f"- sells count:             {int(summary.get('sell_count', 0))}")
-    print(f"- initial: USDT={cfg.init_usdt}, BTC={cfg.init_btc}")
-    print(f"- stacking period: {summary['first_buy_dt']}  ~  {summary['end_dt']}")
-    print(f"- BTC start(after first buy): {summary['btc_start_after_first_buy']:.8f}")
-    print(f"- BTC end:               {summary['btc_end']:.8f}")
-    print(f"- BTC delta:             {summary['btc_delta']:.8f}")
-    if summary["btc_delta_pct"] is not None:
-        print(f"- BTC delta %:           {summary['btc_delta_pct']:.2f}%")
-    print(f"- trailing sells:        {int(summary.get('trailing_sell_count', 0))}")
-    print(f"- trailing profit total: {summary.get('trailing_profit_total', 0.0):.2f}")
-    print(f"- trailing profit avg:   {summary.get('trailing_profit_avg', 0.0):.2f}")
-    print(f"- trailing win rate:     {summary.get('trailing_win_rate', 0.0)*100:.2f}%")
-    print(f"- trailing loss avg:     {summary.get('trailing_loss_avg', 0.0):.2f}")
-    print(f"- equity_end_usdt:       {summary['equity_end_usdt']:.2f}")
-    print(f"- btc_equiv_end:         {summary['btc_equiv_end']:.8f}")
-
-    print(f"- total_deposit(incl topups): {summary.get('deposit_total', 0.0):.2f}")
-    print(f"- topup_total:               {summary.get('topup_total', 0.0):.2f}")
-    print(f"- fee_total:                {summary.get('fee_total', 0.0):.2f}")
-    print(f"- reserve_cost_usdt:        {summary.get('reserve_cost_usdt', 0.0):.2f}")
-    print(f"- btc_start_init:           {summary.get('btc_start_init', 0.0):.8f}")
-    print(f"- btc_end:                  {summary['btc_end']:.8f}")
+    print(
+        "- init: usdt={:.2f} | buy_usdt={:.2f} | buy_btc={:.8f} | usdt_left={:.2f} | btc_equiv_total={:.8f}".format(
+            summary.get("init_usdt_total", 0.0),
+            summary.get("init_buy_spent", 0.0),
+            summary.get("init_buy_qty", 0.0),
+            summary.get("init_usdt_left", 0.0),
+            summary.get("init_btc_equiv_total", 0.0),
+        )
+    )
+    print(
+        "- final: usdt={:.2f} | btc={:.8f} | btc_equiv_total={:.8f}".format(
+            summary.get("end_usdt_total", 0.0),
+            summary.get("end_btc_total", 0.0),
+            summary.get("end_btc_equiv_total", 0.0),
+        )
+    )
+    print(
+        "- btc_equiv_delta: {:.8f} | delta_pct: {}".format(
+            summary.get("btc_equiv_delta", 0.0),
+            f"{summary.get('btc_equiv_delta_pct', 0.0):.2f}%" if summary.get("btc_equiv_delta_pct") is not None else "n/a",
+        )
+    )
+    print(
+        "- trades: buy={} sell={}".format(
+            int(summary.get("stats", {}).get("market_buy_orders", 0)),
+            int(summary.get("stats", {}).get("market_sell_orders", 0)),
+        )
+    )
+    print(
+        "- trade_fail_insufficient: {} (buy={}, sell={})".format(
+            int(summary.get("trade_fail_insufficient_total", 0)),
+            int(summary.get("trade_fail_insufficient_buy", 0)),
+            int(summary.get("trade_fail_insufficient_sell", 0)),
+        )
+    )
 
     stats = summary.get("stats") or {}
     print(f"- market buys:              {int(stats.get('market_buy_orders', 0))}")
+    print(f"- market sells:             {int(stats.get('market_sell_orders', 0))}")
     print(f"- TP limit fills:           {int(stats.get('tp_limit_fills', 0))}")
     print(f"- cancels:                  {int(stats.get('cancels', 0))}")
 
@@ -203,6 +215,7 @@ if __name__ == "__main__":
     if stats:
         print("\n--- TRADING COUNTS ---")
         print(f"- market buys:     {int(stats.get('market_buy_orders', 0))}")
+        print(f"- market sells:    {int(stats.get('market_sell_orders', 0))}")
         print(f"- TP limit placed: {int(stats.get('tp_limit_orders', 0))}")
         print(f"- TP limit fills:  {int(stats.get('tp_limit_fills', 0))}")
         print(f"- cancels:         {int(stats.get('cancels', 0))}")

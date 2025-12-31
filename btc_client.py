@@ -136,6 +136,16 @@ class BTCClient:
             newClientOrderId=coid,
         )
 
+    def place_market_sell(self, qty_base: float, symbol: Optional[str] = None, client_oid: Optional[str] = None):
+        sym = symbol or self.symbol
+        qty = self.adjust_qty(qty_base, sym)
+        coid = client_oid or self._make_client_oid("SELL")
+        return self.client.order_market_sell(
+            symbol=sym,
+            quantity=f"{qty:.8f}",
+            newClientOrderId=coid,
+        )
+
     def place_limit_sell(self, qty_base: float, price: float, symbol: Optional[str] = None, client_oid: Optional[str] = None):
         sym = symbol or self.symbol
         qty = self.adjust_qty(qty_base, sym)

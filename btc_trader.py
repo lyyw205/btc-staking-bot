@@ -206,6 +206,19 @@ class BTCStackingTrader:
         except Exception:
             return int(default)
 
+    def _inc_setting(self, key: str) -> int:
+        try:
+            raw = self.db.get_setting(key, 0)
+            cur = int(float(raw)) if raw is not None and str(raw).strip() != "" else 0
+        except Exception:
+            cur = 0
+        cur += 1
+        try:
+            self.db.set_setting(key, cur)
+        except Exception:
+            pass
+        return cur
+
     def _update_profit_tracker(self, trades: List[dict]):
         if not trades:
             return
@@ -345,6 +358,34 @@ class BTCStackingTrader:
             return self.client.place_limit_sell(
                 qty_base=qty,
                 price=price,
+                symbol=symbol,
+                clientOrderId=client_oid,
+            )
+
+    def _place_market_buy_by_quote(self, *, quote_usdt: float, symbol: str, client_oid: str | None = None):
+        try:
+            return self.client.place_market_buy_by_quote(
+                quote_usdt=quote_usdt,
+                symbol=symbol,
+                client_oid=client_oid,
+            )
+        except TypeError:
+            return self.client.place_market_buy_by_quote(
+                quote_usdt=quote_usdt,
+                symbol=symbol,
+                clientOrderId=client_oid,
+            )
+
+    def _place_market_sell(self, *, qty: float, symbol: str, client_oid: str | None = None):
+        try:
+            return self.client.place_market_sell(
+                qty_base=qty,
+                symbol=symbol,
+                client_oid=client_oid,
+            )
+        except TypeError:
+            return self.client.place_market_sell(
+                qty_base=qty,
                 symbol=symbol,
                 clientOrderId=client_oid,
             )
@@ -588,27 +629,34 @@ class BTCStackingTrader:
             prefix = str(getattr(self.cfg, "client_order_prefix", "BTCSTACK_"))
             client_oid = f"{prefix}INIT_{int(self._now()*1000)}"
 
-            o = self.client.place_market_buy_by_quote(
+            o = self._place_market_buy_by_quote(
                 quote_usdt=buy_usdt,
                 symbol=self.cfg.symbol,
-                clientOrderId=client_oid,
+                client_oid=client_oid,
             )
             self.db.upsert_order(o)
             self._touch_order()
+
+            try:
+                bought_qty = float(o.get("executedQty") or o.get("origQty") or 0.0)
+            except Exception:
+                bought_qty = 0.0
+            try:
+                spent_usdt = float(o.get("cummulativeQuoteQty") or 0.0)
+            except Exception:
+                spent_usdt = 0.0
+
+            if bought_qty > 0 and spent_usdt > 0:
+                avg_price = spent_usdt / bought_qty
+            else:
+                avg_price = self.client.get_price(self.cfg.symbol)
+            self.set_base_price(avg_price)
+            self.db.log("INFO", f"base_price init from entry -> {avg_price:.2f}")
 
             # ✅ reserve 저장(처음 1회만)
             if self.db.get_setting(self._reserve_key(), None) in (None, "", 0, 0.0):
                 reserve_ratio = float(getattr(self.cfg, "initial_reserve_ratio",
                                               getattr(self.cfg, "keep_btc_ratio_on_tp", 0.70)))
-                try:
-                    bought_qty = float(o.get("executedQty") or o.get("origQty") or 0.0)
-                except Exception:
-                    bought_qty = 0.0
-                try:
-                    spent_usdt = float(o.get("cummulativeQuoteQty") or 0.0)
-                except Exception:
-                    spent_usdt = 0.0
-
                 reserve_qty = max(0.0, bought_qty * reserve_ratio)
                 reserve_qty = self.client.adjust_qty(reserve_qty, self.cfg.symbol)
                 self._set_reserve_btc_qty(reserve_qty)
@@ -710,6 +758,99 @@ class BTCStackingTrader:
             self.set_base_price(cur_price)
             self._last_recenter_ts = now
             self.db.log("INFO", f"recenter base_price: {base:.2f} -> {cur_price:.2f} (diff={diff*100:.2f}%)")
+
+    def maybe_recenter_grid_trade(self, cur_price: float, pos_pool: PositionSnapshot):
+        base = self.get_base_price()
+        if base <= 0:
+            self.set_base_price(cur_price)
+            return
+
+        pct = float(self._cfg("simple_recenter_pct", 0.01))
+        buy_pct = float(self._cfg("simple_recenter_buy_pct", pct))
+        sell_pct = float(self._cfg("simple_recenter_sell_pct", pct))
+        if buy_pct <= 0 and sell_pct <= 0:
+            return
+
+        buy_usdt = float(self._cfg("simple_recenter_buy_usdt", 100.0))
+        sell_usdt = float(self._cfg("simple_recenter_sell_usdt", 100.0))
+        quote_asset = self._cfg("quote_asset", "USDT")
+        reserve_buffer = float(self._cfg("usdt_reserve_buffer", 0.0))
+
+        filters = self.client.get_symbol_filters(self.cfg.symbol)
+        min_notional = max(filters.min_notional, float(self._p("min_trade_usdt", float(self._cfg("min_trade_usdt", 0.0)))))
+
+        if buy_pct > 0 and cur_price <= base * (1.0 - buy_pct):
+            if not self._cooldown_ok():
+                return
+
+            bal = self.client.get_balance(quote_asset)
+            free_usdt = float(bal.get("free", 0.0) or 0.0)
+            spendable = max(0.0, free_usdt - reserve_buffer)
+            target_buy_usdt = buy_usdt
+            buy_usdt = min(buy_usdt, spendable)
+
+            if spendable + 1e-12 < target_buy_usdt:
+                self._inc_setting("grid_buy_fail_insufficient")
+                self.db.log("WARN", f"GRID BUY skipped: insufficient {quote_asset} free ({spendable:.2f} < {target_buy_usdt:.2f})")
+                return
+            if buy_usdt < min_notional:
+                self.db.log("WARN", f"GRID BUY skipped: buy_usdt({buy_usdt:.2f}) < min_notional({min_notional:.2f})")
+                return
+
+            try:
+                prefix = str(getattr(self.cfg, "client_order_prefix", "BTCSTACK_"))
+                client_oid = f"{prefix}GRIDBUY_{int(self._now()*1000)}"
+                o = self._place_market_buy_by_quote(
+                    quote_usdt=buy_usdt,
+                    symbol=self.cfg.symbol,
+                    client_oid=client_oid,
+                )
+                self.db.upsert_order(o)
+                self._touch_order()
+                self._apply_profit_pool_to_reserve(o)
+                self.set_base_price(cur_price)
+                self.db.log(
+                    "INFO",
+                    f"GRID BUY quote={buy_usdt:.2f} | base={base:.2f} -> {cur_price:.2f}",
+                )
+            except Exception as e:
+                self.db.log("ERROR", f"GRID BUY failed: {e}")
+            return
+
+        if sell_pct > 0 and cur_price >= base * (1.0 + sell_pct):
+            if not self._cooldown_ok():
+                return
+
+            qty = sell_usdt / cur_price if cur_price > 0 else 0.0
+            qty = self.client.adjust_qty(qty, self.cfg.symbol)
+            if qty <= 0:
+                return
+            if qty > float(pos_pool.btc_qty) + 1e-12:
+                self._inc_setting("grid_sell_fail_insufficient")
+                self.db.log("WARN", f"GRID SELL skipped: insufficient {self.cfg.base_asset} free ({pos_pool.btc_qty:.8f} < {qty:.8f})")
+                return
+
+            notional = qty * cur_price
+            if notional < min_notional:
+                return
+
+            try:
+                prefix = str(getattr(self.cfg, "client_order_prefix", "BTCSTACK_"))
+                client_oid = f"{prefix}GRIDSELL_{int(self._now()*1000)}"
+                o = self._place_market_sell(
+                    qty=qty,
+                    symbol=self.cfg.symbol,
+                    client_oid=client_oid,
+                )
+                self.db.upsert_order(o)
+                self._touch_order()
+                self.set_base_price(cur_price)
+                self.db.log(
+                    "INFO",
+                    f"GRID SELL quote={sell_usdt:.2f} | base={base:.2f} -> {cur_price:.2f}",
+                )
+            except Exception as e:
+                self.db.log("ERROR", f"GRID SELL failed: {e}")
 
     # -----------------------------
     # Cooldown
@@ -947,7 +1088,7 @@ class BTCStackingTrader:
                 return
 
             try:
-                o = self.client.place_market_buy_by_quote(quote_usdt=buy_usdt, symbol=self.cfg.symbol)
+                o = self._place_market_buy_by_quote(quote_usdt=buy_usdt, symbol=self.cfg.symbol)
                 self.db.upsert_order(o)
                 self._touch_order()
                 self._apply_profit_pool_to_reserve(o)
@@ -969,7 +1110,7 @@ class BTCStackingTrader:
             return
 
         try:
-            o = self.client.place_market_buy_by_quote(quote_usdt=buy_usdt, symbol=self.cfg.symbol)
+            o = self._place_market_buy_by_quote(quote_usdt=buy_usdt, symbol=self.cfg.symbol)
             self.db.upsert_order(o)
             self._touch_order()
             self._apply_profit_pool_to_reserve(o)
@@ -1023,6 +1164,10 @@ class BTCStackingTrader:
 
         pos_all = self.db.get_position(self.cfg.symbol)
         pos_pool = self.db.get_pool_position(self.cfg.symbol)
+
+        if bool(self._cfg("simple_recenter_mode", False)):
+            self.maybe_recenter_grid_trade(cur_price, pos_pool)
+            return
 
         cap = self._get_trade_cap_snapshot(pos_pool)
 

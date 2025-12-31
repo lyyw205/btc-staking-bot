@@ -32,10 +32,10 @@ class BTCBacktestConfig:
     init_usdt: float = 100000.0
     init_btc: float = 0.0
     initial_buy_on_start: bool = True
-    initial_buy_ratio: float = 0.70
+    initial_buy_ratio: float = 0.30
     initial_buy_usdt: Optional[float] = None
     initial_entry_usdt: Optional[float] = None
-    initial_reserve_ratio: float = 0.50
+    initial_reserve_ratio: float = 0.80
     reserve_btc_key: str = "reserve_btc_qty"
 
     # Execution Assumptions
@@ -46,7 +46,7 @@ class BTCBacktestConfig:
     # Exchange Filters
     tick_size: float = 0.1
     step_size: float = 0.000001
-    min_notional: float = 10.0
+    min_notional: float = 0.0
 
     # Order ID Prefix (pool tagging)
     client_order_prefix: str = "BTCSTACK_"
@@ -85,6 +85,14 @@ class BTCBacktestConfig:
     # Base price recentering
     recenter_threshold_pct: float = 0.020
     recenter_cooldown_sec: int = 60
+
+    # Simple recenter grid (fixed buy/sell)
+    simple_recenter_mode: bool = True
+    simple_recenter_pct: float = 0.010
+    simple_recenter_buy_pct: float = 0.010
+    simple_recenter_sell_pct: float = 0.015
+    simple_recenter_buy_usdt: float = 50.0
+    simple_recenter_sell_usdt: float = 50.0
 
     # Crash-aware sizing
     crash_drop_pct: float = 0.035
@@ -133,7 +141,7 @@ class BTCBacktestConfig:
             init_btc=f("INIT_BTC", cls.init_btc),
             initial_buy_on_start=b("INITIAL_BUY_ON_START", cls.initial_buy_on_start),
             initial_buy_ratio=f("INITIAL_BUY_RATIO", cls.initial_buy_ratio),
-            initial_buy_usdt=f("INITIAL_BUY_USDT", cls.initial_buy_usdt) if os.getenv("BT_INITIAL_BUY_USDT") is not None else None,
+            initial_buy_usdt=f("INITIAL_BUY_USDT", cls.initial_buy_usdt) if os.getenv("BT_INITIAL_BUY_USDT") is not None else cls.initial_buy_usdt,
             initial_entry_usdt=f("INITIAL_ENTRY_USDT", cls.initial_entry_usdt) if os.getenv("BT_INITIAL_ENTRY_USDT") is not None else None,
             initial_reserve_ratio=f("INITIAL_RESERVE_RATIO", cls.initial_reserve_ratio),
             reserve_btc_key=s("RESERVE_BTC_KEY", cls.reserve_btc_key),
@@ -177,6 +185,12 @@ class BTCBacktestConfig:
 
             recenter_threshold_pct=f("RECENTER_THRESHOLD_PCT", cls.recenter_threshold_pct),
             recenter_cooldown_sec=i("RECENTER_COOLDOWN_SEC", cls.recenter_cooldown_sec),
+            simple_recenter_mode=b("SIMPLE_RECENTER_MODE", cls.simple_recenter_mode),
+            simple_recenter_pct=f("SIMPLE_RECENTER_PCT", cls.simple_recenter_pct),
+            simple_recenter_buy_pct=f("SIMPLE_RECENTER_BUY_PCT", cls.simple_recenter_buy_pct),
+            simple_recenter_sell_pct=f("SIMPLE_RECENTER_SELL_PCT", cls.simple_recenter_sell_pct),
+            simple_recenter_buy_usdt=f("SIMPLE_RECENTER_BUY_USDT", cls.simple_recenter_buy_usdt),
+            simple_recenter_sell_usdt=f("SIMPLE_RECENTER_SELL_USDT", cls.simple_recenter_sell_usdt),
 
             crash_drop_pct=f("CRASH_DROP_PCT", cls.crash_drop_pct),
             crash_vol_threshold=f("CRASH_VOL_THRESHOLD", cls.crash_vol_threshold),
@@ -269,6 +283,7 @@ class BacktestClient:
         self.stats["init_usdt"] = float(init_usdt)
         self.stats["init_btc"] = float(init_btc)
         self.stats["market_buy_orders"] = 0.0
+        self.stats["market_sell_orders"] = 0.0
         self.stats["tp_limit_orders"] = 0.0
         self.stats["tp_limit_fills"] = 0.0
         self.stats["cancels"] = 0.0
@@ -473,6 +488,76 @@ class BacktestClient:
             "commissionAsset": self.quote_asset,
             "time": int(self.cur_ts * 1000),
             "isBuyer": True,
+            "isMaker": False,
+        }
+        self._fills.append(trade)
+
+        return order.copy()
+
+    def place_market_sell(
+        self,
+        *,
+        qty_base: float,
+        symbol: str,
+        clientOrderId: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        assert symbol == self.symbol
+        qty = self.adjust_qty(float(qty_base), symbol)
+        if qty <= 0:
+            raise ValueError("qty_base must be > 0")
+
+        if qty > self._base_free + 1e-12:
+            raise ValueError(f"insufficient {self.base_asset} free: need={qty:.8f}, have={self._base_free:.8f}")
+
+        px = float(self.cur_close) * (1.0 - self.slippage_bps / 10000.0)
+        px = self.adjust_price(px, symbol)
+
+        gross = qty * px
+        if gross < max(self.filters.min_notional, 0.0):
+            raise ValueError(f"min_notional not met: notional={gross:.4f}")
+
+        fee_q = gross * self.taker_fee_rate
+        net = max(0.0, gross - fee_q)
+
+        oid = self._new_order_id()
+        coid = clientOrderId or f"{self.client_order_prefix}{oid}"
+
+        order = {
+            "symbol": symbol,
+            "orderId": oid,
+            "clientOrderId": coid,
+            "transactTime": int(self.cur_ts * 1000),
+            "price": "0",
+            "origQty": f"{qty:.8f}",
+            "executedQty": f"{qty:.8f}",
+            "cummulativeQuoteQty": f"{gross:.8f}",
+            "status": "FILLED",
+            "timeInForce": "GTC",
+            "type": "MARKET",
+            "side": "SELL",
+        }
+        self._orders[oid] = order
+
+        self._base_free -= qty
+        self._quote_free += net
+
+        # stats
+        self.stats["market_sell_orders"] += 1.0
+        self.stats["fee_total"] += float(fee_q)
+        self.stats["sell_gross_total"] += float(gross)
+        self.stats["sell_fee_total"] += float(fee_q)
+
+        trade = {
+            "symbol": symbol,
+            "id": len(self._fills) + 1,
+            "orderId": oid,
+            "price": f"{px:.8f}",
+            "qty": f"{qty:.8f}",
+            "quoteQty": f"{gross:.8f}",
+            "commission": f"{fee_q:.8f}",
+            "commissionAsset": self.quote_asset,
+            "time": int(self.cur_ts * 1000),
+            "isBuyer": False,
             "isMaker": False,
         }
         self._fills.append(trade)
@@ -819,6 +904,11 @@ def run_backtest(df: pd.DataFrame, *, cfg: BTCBacktestConfig) -> Tuple[pd.DataFr
     stats_after_init = client.get_stats()
     initial_executed = int(stats_after_init.get("market_buy_orders", 0)) > 0
     init_buy_spent = float(stats_after_init.get("buy_spent_total", 0.0))
+    bal_u_init = client.get_balance(cfg.quote_asset)
+    bal_b_init = client.get_balance(cfg.base_asset)
+    init_usdt_left = float(bal_u_init["total"])
+    init_btc_total = float(bal_b_init["total"])
+    init_buy_qty = max(0.0, init_btc_total - float(cfg.init_btc))
 
     rows: List[Dict[str, Any]] = []
     first_buy_dt: Optional[pd.Timestamp] = None
@@ -869,12 +959,19 @@ def run_backtest(df: pd.DataFrame, *, cfg: BTCBacktestConfig) -> Tuple[pd.DataFr
     grid_buy_count = max(0, total_buy_orders - (1 if initial_executed else 0))
     grid_buy_spent_total = max(0.0, total_buy_spent - (init_buy_spent if initial_executed else 0.0))
 
-    # 매도 횟수 = TP 지정가 체결 횟수
-    sell_count = int(stats.get("tp_limit_fills", 0))
+    market_sell_count = int(stats.get("market_sell_orders", 0))
+    # 매도 횟수 = TP 지정가 체결 + 시장가 매도
+    sell_count = market_sell_count + int(stats.get("tp_limit_fills", 0))
 
     # 마지막 종가/지표들
     first_close = float(out["close"].iloc[0])
     last_close = float(out["close"].iloc[-1])
+    init_btc_equiv_total = (init_usdt_left / first_close + init_btc_total) if first_close > 0 else 0.0
+    end_usdt_total = float(out["usdt_total"].iloc[-1])
+    end_btc_total = float(out["btc_total"].iloc[-1])
+    end_btc_equiv_total = (end_usdt_total / last_close + end_btc_total) if last_close > 0 else 0.0
+    btc_equiv_delta = end_btc_equiv_total - init_btc_equiv_total
+    btc_equiv_delta_pct = (btc_equiv_delta / init_btc_equiv_total * 100.0) if init_btc_equiv_total > 0 else None
     btc_start = (float(cfg.init_usdt) / first_close + float(cfg.init_btc)) if first_close > 0 else 0.0
     equity_end_usdt = float(out["equity_usdt"].iloc[-1])
     btc_end = (equity_end_usdt / last_close) if last_close > 0 else 0.0
@@ -882,6 +979,8 @@ def run_backtest(df: pd.DataFrame, *, cfg: BTCBacktestConfig) -> Tuple[pd.DataFr
     btc_delta = btc_end - btc_start
     btc_delta_pct = (btc_delta / btc_start * 100.0) if btc_start > 0 else None
     btc_equiv_end = btc_end
+    buy_fail = int(db.get_setting("grid_buy_fail_insufficient", 0) or 0)
+    sell_fail = int(db.get_setting("grid_sell_fail_insufficient", 0) or 0)
 
     trailing_stats = db.compute_trailing_stats(cfg.symbol)
     summary = {
@@ -903,14 +1002,30 @@ def run_backtest(df: pd.DataFrame, *, cfg: BTCBacktestConfig) -> Tuple[pd.DataFr
         "btc_delta": float(btc_delta),
         "btc_delta_pct": btc_delta_pct,
         "btc_equiv_end": float(btc_equiv_end),
+        "init_usdt_total": float(cfg.init_usdt),
+        "init_buy_spent": float(init_buy_spent),
+        "init_buy_qty": float(init_buy_qty),
+        "init_usdt_left": float(init_usdt_left),
+        "init_btc_total": float(init_btc_total),
+        "init_btc_equiv_total": float(init_btc_equiv_total),
+        "end_usdt_total": float(end_usdt_total),
+        "end_btc_total": float(end_btc_total),
+        "end_btc_equiv_total": float(end_btc_equiv_total),
+        "btc_equiv_delta": float(btc_equiv_delta),
+        "btc_equiv_delta_pct": btc_equiv_delta_pct,
+        "trade_fail_insufficient_buy": buy_fail,
+        "trade_fail_insufficient_sell": sell_fail,
+        "trade_fail_insufficient_total": buy_fail + sell_fail,
         **trailing_stats,
 
         "trades": {
             "market_buys": int(stats.get("market_buy_orders", 0)),
+            "market_sells": int(stats.get("market_sell_orders", 0)),
             "tp_limit_orders": int(stats.get("tp_limit_orders", 0)),
             "tp_fills": int(stats.get("tp_limit_fills", 0)),
             "cancels": int(stats.get("cancels", 0)),
         },
+        "stats": stats,
     }
     for k, v in trailing_stats.items():
         out[k] = v
