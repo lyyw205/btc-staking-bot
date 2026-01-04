@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import subprocess
 from datetime import datetime
-from typing import List, Dict
+from typing import Dict, List
 
 from flask import Flask, jsonify, request, Response
 
@@ -22,199 +22,70 @@ APP_PORT = 8080
 
 SERVICE_NAME = "btc-stacking-bot"  # journalctl -u <service>
 
-# "거래 관련"으로 보고 싶은 키워드(너 로그 스타일에 맞춰 추가/삭제 가능)
-TRADE_RE = re.compile(r"\b(BUY|SELL|LONG|SHORT|ENTRY|EXIT|TP|SL)\b", re.IGNORECASE)
-
-# "설정 변경"으로 보고 싶은 키워드
-TUNE_RE = re.compile(r"\b(TUNE|tune\.|dashboard overrides updated)\b", re.IGNORECASE)
-
-# "에러"로 보고 싶은 키워드
+TRADE_RE = re.compile(r"\b(BUY|SELL|ENTRY|EXIT)\b", re.IGNORECASE)
+TUNE_RE = re.compile(r"\b(TUNE|tune\.)\b", re.IGNORECASE)
 ERROR_RE = re.compile(
     r"(ERROR|Traceback|Exception|ModuleNotFoundError|Failed with result|status=\d+/FAILURE)",
     re.IGNORECASE,
 )
 
 app = Flask(__name__)
+_db: BTCDB | None = None
 
 TUNE_FIELDS = {
-    "grid_step_pct": {
+    "lot_drop_pct": {
+        "type": "float",
+        "min": 0.001,
+        "max": 0.02,
+        "step": 0.0005,
+        "title": "추가 매수 하락폭(lot_drop_pct)",
+        "desc": "기준가 대비 하락 트리거 비율",
+        "unit": "%",
+    },
+    "lot_tp_pct": {
         "type": "float",
         "min": 0.002,
-        "max": 0.05,
-        "step": 0.001,
-        "title": "추가매수 그리드(grid_step_pct)",
-        "desc": "추가 매수 간격 설정(%)",
+        "max": 0.03,
+        "step": 0.0005,
+        "title": "로트 익절 비율(lot_tp_pct)",
+        "desc": "매수가 대비 익절 비율",
+        "unit": "%",
     },
-    "take_profit_pct": {
+    "lot_prebuy_pct": {
         "type": "float",
-        "min": 0.002,
-        "max": 0.05,
-        "step": 0.001,
-        "title": "익절 비율(take_profit_pct)",
-        "desc": "익절 비율(%)",
+        "min": 0.0005,
+        "max": 0.01,
+        "step": 0.0005,
+        "title": "사전 매수 범위(lot_prebuy_pct)",
+        "desc": "트리거 위에서 지정가를 미리 거는 범위",
+        "unit": "%",
     },
-    "buy_quote_usdt": {
+    "lot_cancel_rebound_pct": {
         "type": "float",
-        "min": 5.0,
-        "max": 250.0,
+        "min": 0.001,
+        "max": 0.02,
+        "step": 0.0005,
+        "title": "되돌림 취소 비율(lot_cancel_rebound_pct)",
+        "desc": "트리거 대비 되돌림 시 주문 취소",
+        "unit": "%",
+    },
+    "lot_buy_usdt": {
+        "type": "float",
+        "min": 10.0,
+        "max": 500.0,
         "step": 1.0,
-        "title": "1회 추가 매수액(buy_quote_usdt)",
-        "desc": "1회 추가 매수 금액(USDT)",
-    },
-    "tp_refresh_sec": {
-        "type": "int",
-        "min": 5,
-        "max": 300,
-        "step": 5,
-        "title": "익절 주문 갱신(tp_refresh_sec)",
-        "desc": "익절 범위 업데이트 주기",
-    },
-    "trailing_activate_pct": {
-        "type": "float",
-        "min": 0.005,
-        "max": 0.2,
-        "step": 0.001,
-        "title": "트레일링 시작 기준(trailing_activate_pct)",
-        "desc": "매수가 대비 이익이 이 비율 이상이면 트레일링 시작",
-    },
-    "trailing_ratio": {
-        "type": "float",
-        "min": 0.5,
-        "max": 0.95,
-        "step": 0.01,
-        "title": "트레일링 되돌림 비율(trailing_ratio)",
-        "desc": "상승폭 대비 몇 % 되돌림에서 매도",
-    },
-    "sell_fraction_on_tp": {
-        "type": "float",
-        "min": 0.01,
-        "max": 1.0,
-        "step": 0.01,
-        "title": "트레일링 익절 비율(sell_fraction_on_tp)",
-        "desc": "TP도달/ 체결 시 보유 btc의 몇%를 팔지",
-    },
-    "min_trade_usdt": {
-        "type": "float",
-        "min": 0.0,
-        "max": 50.0,
-        "step": 0.5,
-        "title": "최소 주문 금액(min_trade_usdt)",
-        "desc": "이 값보다 낮은 주문은 실행하지 않음",
-    },
-    "buy_min_usdt": {
-        "type": "float",
-        "min": 1.0,
-        "max": 50.0,
-        "step": 0.5,
-        "title": "동적 최소 매수 금액(buy_min_usdt)",
-        "desc": "매수 금액 변동성 True 시 최소 매수 금액",
-    },
-    "buy_max_usdt": {
-        "type": "float",
-        "min": 5.0,
-        "max": 300.0,
-        "step": 1.0,
-        "title": "동적 최대 매수 금액(buy_max_usdt)",
-        "desc": "매수 금액 변동성 True 시 최대 매수 금액",
-    },
-    "recenter_threshold_pct": {
-        "type": "float",
-        "min": 0.005,
-        "max": 0.1,
-        "step": 0.001,
-        "title": "기준가를 갱신 조건(recenter_threshold_pct)",
-        "desc": "기준가와 현재가의 괴리가 2% 이상 벌어지면 → 기준가를 다시 잡는다.",
-    },
-    "recenter_cooldown_sec": {
-        "type": "int",
-        "min": 10,
-        "max": 600,
-        "step": 10,
-        "title": "갱신 쿨타임(recenter_cooldown_sec)",
-        "desc": "기준가를 갱신한 뒤 최소 몇 초 동안은 다시 갱신하지 않도록 막는 쿨다운",
-    },
-    "price_vol_window": {
-        "type": "int",
-        "min": 5,
-        "max": 200,
-        "step": 1,
-        "title": "변동성 계산 구간(price_vol_window)",
-        "desc": "변동성 계산에 쓰는 최근 N개 구간 길이",
-    },
-    "vol_low": {
-        "type": "float",
-        "min": 0.0001,
-        "max": 0.05,
-        "step": 0.0001,
-        "title": "변동성 낮음 기준(vol_low)",
-        "desc": "변동성이 낮다 판단 기준",
-    },
-    "vol_high": {
-        "type": "float",
-        "min": 0.0001,
-        "max": 0.1,
-        "step": 0.0001,
-        "title": "변동성 높음 기준(vol_high)",
-        "desc": "변동성이 높다 판단 기준",
-    },
-    "vol_boost_max": {
-        "type": "float",
-        "min": 0.5,
-        "max": 3.0,
-        "step": 0.01,
-        "title": "변동성 증폭 상한(vol_boost_max)",
-        "desc": "변동성이 특정 조건일 때 매수 금액을 최대 몇 배까지 늘릴지(상한)",
-    },
-    "vol_cut_min": {
-        "type": "float",
-        "min": 0.1,
-        "max": 1.0,
-        "step": 0.01,
-        "title": "변동성 축소 하한(vol_cut_min)",
-        "desc": "변동성이 특정 조건일 때 매수 금액을 최소 몇 배까지 줄일지(하한)",
-    },
-    "crash_drop_pct": {
-        "type": "float",
-        "min": 0.01,
-        "max": 0.2,
-        "step": 0.001,
-        "title": "급락 기준폭(crash_drop_pct)",
-        "desc": "급락 판단 기준 하락폭",
-    },
-    "loop_interval_sec": {
-        "type": "int",
-        "min": 5,
-        "max": 600,
-        "step": 5,
-        "title": "메인 루프 주기(loop_interval_sec)",
-        "desc": "메인 루프가 몇 초마다 한 번씩 실행되는지",
-    },
-    "trade_cap_ratio": {
-        "type": "float",
-        "min": 0.05,
-        "max": 1.0,
-        "step": 0.01,
-        "title": "트레이드캡(trade_cap_ratio)",
-        "desc": "전체 USDT 중에서 이 전략이 실제로 굴리는 운용 자금 비율",
+        "title": "로트 매수금액(lot_buy_usdt)",
+        "desc": "추가 매수 기본 USDT",
+        "unit": "USDT",
     },
 }
 
 TOGGLE_FIELDS = {
-    "dynamic_buy": {
-        "title": "매수 금액 변동성(dynamic_buy)",
-        "desc": "매수 금액을 고정이 아니라 상황(노출/변동성 등)에 따라 가변으로 할지.",
-    },
-    "trailing_sell_enable": {
-        "title": "트레일링 매도 사용(trailing_sell_enable)",
-        "desc": "ON이면 트레일링 매도만 사용하고 TP 리밋은 비활성화",
-    },
     "verbose": {
         "title": "로깅(verbose)",
         "desc": "로그를 상세히 찍을지 여부",
     },
 }
-
-_db: BTCDB | None = None
 
 HTML = """
 <!doctype html>
@@ -246,7 +117,6 @@ HTML = """
     .badge { background: linear-gradient(120deg, var(--accent), #f7d488); color:#1a1303; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; letter-spacing: 0.6px; }
     .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
     .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 16px; margin-top: 16px; box-shadow: 0 10px 30px rgba(0,0,0,0.35); }
-    .panel.half { flex: 1; min-width: 320px; }
     .label { font-size: 13px; color: var(--muted); letter-spacing: 0.5px; text-transform: uppercase; margin-bottom: 6px; display:block; }
     input, select, button {
       padding: 8px 10px; border-radius: 10px; border:1px solid var(--border);
@@ -254,10 +124,9 @@ HTML = """
     }
     button { cursor:pointer; }
     button.primary { background: linear-gradient(120deg, var(--accent), #f7d488); color: #1a1303; border: none; font-weight: 700; }
-    button.secondary { border: 1px solid var(--border); }
     .meta { opacity:0.8; font-size: 13px; color: var(--muted); }
+    .logs { margin-top: 16px; }
     .grid { display:grid; gap: 14px; grid-template-columns: repeat(2, minmax(260px, 1fr)); }
-    .section { margin-top: 12px; }
     .section-title { font-size: 14px; color: var(--muted); letter-spacing: 0.5px; text-transform: uppercase; margin: 20px 0 10px 5px; }
     .tune-row { display:flex; gap:10px; align-items:center; }
     .tune-row input[type="number"] { width: 110px; }
@@ -267,7 +136,6 @@ HTML = """
     .unit { position: absolute; right: 10px; font-size: 11px; color: var(--muted); pointer-events: none; }
     .hint { font-size: 12px; color: var(--muted); }
     .status { font-size: 13px; color: var(--accent-2); }
-    .logs { margin-top: 16px; }
     .stats-grid { display:grid; gap: 12px; grid-template-columns: repeat(4, minmax(160px, 1fr)); }
     .stat { background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px; padding: 10px; }
     .stat .val { font-size: 18px; font-weight: 700; }
@@ -293,17 +161,6 @@ HTML = """
     }
     input:checked + .slider { background-color: #4cc9f0; }
     input:checked + .slider:before { transform: translateX(24px); }
-    .modal {
-      position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
-      background: rgba(5, 7, 10, 0.7); z-index: 999;
-    }
-    .modal.show { display: flex; }
-    .modal-card {
-      background: var(--panel); border: 1px solid var(--border); border-radius: 16px;
-      padding: 18px; min-width: 280px; text-align: center; box-shadow: 0 20px 60px rgba(0,0,0,0.5);
-    }
-    .modal-card strong { display: block; margin-bottom: 6px; }
-    .modal-card button { margin-top: 12px; }
   </style>
 </head>
 <body>
@@ -393,26 +250,8 @@ HTML = """
         </div>
         <div class="status" id="save-status">-</div>
       </div>
-      <div class="section">
-        <div class="section-title">매수 조건</div>
-        <div class="grid" id="tune-buy"></div>
-      </div>
-      <div class="section">
-        <div class="section-title">매도 조건</div>
-        <div class="grid" id="tune-sell"></div>
-      </div>
-      <div class="section">
-        <div class="section-title">기준가 조건</div>
-        <div class="grid" id="tune-base"></div>
-      </div>
-      <div class="section">
-        <div class="section-title">변동성 조건</div>
-        <div class="grid" id="tune-vol"></div>
-      </div>
-      <div class="section">
-        <div class="section-title">기타 조건</div>
-        <div class="grid" id="tune-etc"></div>
-      </div>
+      <div class="section-title">로트 전략 설정</div>
+      <div class="grid" id="tune-grid"></div>
       <div class="row" style="margin-top: 20px; justify-content: flex-end;">
         <button class="primary" onclick="saveTune()">Save</button>
         <button class="secondary" onclick="loadTune()">Reload</button>
@@ -420,58 +259,19 @@ HTML = """
     </div>
   </div>
 
-  <div class="modal" id="save-modal">
-    <div class="modal-card">
-      <strong>Saved</strong>
-      <div id="save-modal-text" class="hint">Tune values updated.</div>
-      <button class="primary" onclick="closeSaveModal()">OK</button>
-    </div>
-  </div>
-
 <script>
 let timer = null;
 const tuneFields = [
-  {key: "grid_step_pct", title: "추가매수 그리드(grid_step_pct) ⭐", desc: "추가 매수 간격 설정(%)", min: 0.002, max: 0.05, step: 0.001, unit: "%"},
-  {key: "take_profit_pct", title: "익절 비율(take_profit_pct) ⭐", desc: "익절 비율(%)", min: 0.002, max: 0.05, step: 0.001, unit: "%"},
-  {key: "buy_quote_usdt", title: "1회 추가 매수액(buy_quote_usdt) ⭐", desc: "1회 추가 매수 금액(USDT)", min: 5, max: 250, step: 1, unit: "USDT"},
-  {key: "tp_refresh_sec", title: "익절 주문 갱신(tp_refresh_sec)", desc: "익절 범위 업데이트 주기", min: 5, max: 300, step: 5, unit: "s"},
-  {key: "trailing_activate_pct", title: "트레일링 시작 기준(trailing_activate_pct)", desc: "매수가 대비 이익이 이 비율 이상이면 트레일링 시작", min: 0.005, max: 0.2, step: 0.001, unit: "%"},
-  {key: "trailing_ratio", title: "트레일링 되돌림 비율(trailing_ratio)", desc: "상승폭 대비 몇 % 되돌림에서 매도", min: 0.5, max: 0.95, step: 0.01, unit: "%"},
-  {key: "sell_fraction_on_tp", title: "익절 비율(sell_fraction_on_tp) ⭐", desc: "TP도달/ 체결 시 보유 btc의 몇%를 팔지", min: 0.01, max: 1.0, step: 0.01, unit: "%"},
-  {key: "min_trade_usdt", title: "최소 주문 금액(min_trade_usdt) ⭐", desc: "이 값보다 낮은 주문은 실행하지 않음", min: 0, max: 50, step: 0.5, unit: "USDT"},
-  {key: "buy_min_usdt", title: "동적 최소 매수 금액(buy_min_usdt)", desc: "매수 금액 변동성 True 시 최소 매수 금액", min: 1, max: 50, step: 0.5, unit: "USDT"},
-  {key: "buy_max_usdt", title: "동적 최대 매수 금액(buy_max_usdt)", desc: "매수 금액 변동성 True 시 최대 매수 금액", min: 5, max: 300, step: 1, unit: "USDT"},
-  {key: "recenter_threshold_pct", title: "기준가를 갱신 조건(recenter_threshold_pct)", desc: "기준가와 현재가의 괴리가 2% 이상 벌어지면 → 기준가를 다시 잡는다.", min: 0.005, max: 0.1, step: 0.001, unit: "%"},
-  {key: "recenter_cooldown_sec", title: "갱신 쿨타임(recenter_cooldown_sec)", desc: "기준가를 갱신한 뒤 최소 몇 초 동안은 다시 갱신하지 않도록 막는 쿨다운", min: 10, max: 600, step: 10, unit: "s"},
-  {key: "price_vol_window", title: "변동성 계산 구간(price_vol_window)", desc: "변동성 계산에 쓰는 최근 N개 구간 길이", min: 5, max: 200, step: 1, unit: "n"},
-  {key: "vol_low", title: "변동성 낮음 기준(vol_low)", desc: "변동성이 낮다 판단 기준", min: 0.0001, max: 0.05, step: 0.0001, unit: ""},
-  {key: "vol_high", title: "변동성 높음 기준(vol_high)", desc: "변동성이 높다 판단 기준", min: 0.0001, max: 0.1, step: 0.0001, unit: ""},
-  {key: "vol_boost_max", title: "변동성 증폭 상한(vol_boost_max)", desc: "변동성이 특정 조건일 때 매수 금액을 최대 몇 배까지 늘릴지(상한)", min: 0.5, max: 3.0, step: 0.01, unit: "x"},
-  {key: "vol_cut_min", title: "변동성 축소 하한(vol_cut_min)", desc: "변동성이 특정 조건일 때 매수 금액을 최소 몇 배까지 줄일지(하한)", min: 0.1, max: 1.0, step: 0.01, unit: "x"},
-  {key: "crash_drop_pct", title: "급락 기준폭(crash_drop_pct)", desc: "급락 판단 기준 하락폭", min: 0.01, max: 0.2, step: 0.001, unit: "%"},
-  {key: "loop_interval_sec", title: "메인 루프 주기(loop_interval_sec)", desc: "메인 루프가 몇 초마다 한 번씩 실행되는지", min: 5, max: 600, step: 5, unit: "s"},
-  {key: "trade_cap_ratio", title: "트레이드캡(trade_cap_ratio)", desc: "전체 USDT 중에서 이 전략이 실제로 굴리는 운용 자금 비율", min: 0.05, max: 1.0, step: 0.01, unit: "%"},
+  {key: "lot_drop_pct", title: "추가 매수 하락폭(lot_drop_pct)", desc: "기준가 대비 하락 트리거 비율", min: 0.001, max: 0.02, step: 0.0005, unit: "%"},
+  {key: "lot_tp_pct", title: "로트 익절 비율(lot_tp_pct)", desc: "매수가 대비 익절 비율", min: 0.002, max: 0.03, step: 0.0005, unit: "%"},
+  {key: "lot_prebuy_pct", title: "사전 매수 범위(lot_prebuy_pct)", desc: "트리거 위에서 지정가를 미리 거는 범위", min: 0.0005, max: 0.01, step: 0.0005, unit: "%"},
+  {key: "lot_cancel_rebound_pct", title: "되돌림 취소 비율(lot_cancel_rebound_pct)", desc: "트리거 대비 되돌림 시 주문 취소", min: 0.001, max: 0.02, step: 0.0005, unit: "%"},
+  {key: "lot_buy_usdt", title: "로트 매수금액(lot_buy_usdt)", desc: "추가 매수 기본 USDT", min: 10, max: 500, step: 1, unit: "USDT"},
 ];
-
-const tuneGroups = {
-  buy: ["grid_step_pct", "buy_quote_usdt", "min_trade_usdt", "buy_min_usdt", "buy_max_usdt"],
-  sell: ["take_profit_pct", "tp_refresh_sec", "trailing_activate_pct", "trailing_ratio", "sell_fraction_on_tp"],
-  base: ["recenter_threshold_pct", "recenter_cooldown_sec"],
-  vol: ["price_vol_window", "vol_low", "vol_high", "vol_boost_max", "vol_cut_min"],
-  etc: ["crash_drop_pct", "loop_interval_sec", "trade_cap_ratio"],
-};
 
 const toggleFields = [
-  {key: "dynamic_buy", title: "매수 금액 변동성(dynamic_buy)", desc: "매수 금액을 고정이 아니라 상황(노출/변동성 등)에 따라 가변으로 할지."},
-  {key: "trailing_sell_enable", title: "트레일링 매도 사용(trailing_sell_enable)", desc: "ON이면 트레일링 매도만 사용하고 TP 리밋은 비활성화"},
   {key: "verbose", title: "로깅(verbose)", desc: "로그를 상세히 찍을지 여부"},
 ];
-
-const toggleGroups = {
-  buy: ["dynamic_buy"],
-  sell: ["trailing_sell_enable"],
-  etc: ["verbose"],
-};
 
 function escHtml(s){
   return s.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
@@ -481,6 +281,68 @@ function setTimer(){
   if (timer) clearInterval(timer);
   const sec = parseInt(document.getElementById('refresh').value, 10);
   if (sec > 0) timer = setInterval(() => { loadLogs(); loadTrades(); }, sec * 1000);
+}
+
+function formatNum(x, digits = 2){
+  const n = Number(x);
+  if (!Number.isFinite(n)) return "-";
+  return n.toFixed(digits);
+}
+
+function buildTuneUI(values){
+  const grid = document.getElementById('tune-grid');
+  grid.innerHTML = "";
+
+  const addField = (f) => {
+    const val = values[f.key];
+    const listId = `dl-${f.key}`;
+    const row = document.createElement('div');
+    row.className = "panel";
+    const isFloat = String(f.step).includes(".");
+    const ticks = 5;
+    let options = "";
+    for (let i = 0; i <= ticks; i++) {
+      const v = f.min + ((f.max - f.min) * i / ticks);
+      const txt = isFloat ? v.toFixed(4) : Math.round(v).toString();
+      options += `<option value="${txt}"></option>`;
+    }
+    row.innerHTML = `
+      <div class="label"><strong>${f.title}</strong></div>
+      <div class="hint">${f.desc}</div>
+      <div class="tune-row">
+        <input type="range" min="${f.min}" max="${f.max}" step="${f.step}" value="${val}" id="r-${f.key}" list="${listId}">
+        <div class="unit-wrap">
+          <input type="number" min="${f.min}" max="${f.max}" step="${f.step}" value="${val}" id="n-${f.key}">
+          <span class="unit">${f.unit || ""}</span>
+        </div>
+      </div>
+      <datalist id="${listId}">${options}</datalist>
+    `;
+    grid.appendChild(row);
+
+    const range = row.querySelector(`#r-${f.key}`);
+    const num = row.querySelector(`#n-${f.key}`);
+    range.addEventListener('input', () => { num.value = range.value; });
+    num.addEventListener('input', () => { range.value = num.value; });
+  };
+
+  const addToggle = (f) => {
+    const val = !!values[f.key];
+    const row = document.createElement('div');
+    row.className = "panel";
+    row.innerHTML = `
+      <div class="label"><strong>${f.title}</strong></div>
+      <div class="hint">${f.desc}</div>
+      <label class="switch">
+        <input type="checkbox" id="b-${f.key}" ${val ? "checked" : ""}>
+        <span class="slider"></span>
+      </label>
+    `;
+    grid.appendChild(row);
+  };
+
+  tuneFields.forEach(f => addField(f));
+  toggleFields.forEach(f => addToggle(f));
 }
 
 async function loadLogs(){
@@ -502,92 +364,6 @@ async function loadLogs(){
   }).join("");
 }
 
-function buildTuneUI(values){
-  const gridMap = {
-    buy: document.getElementById('tune-buy'),
-    sell: document.getElementById('tune-sell'),
-    base: document.getElementById('tune-base'),
-    vol: document.getElementById('tune-vol'),
-    etc: document.getElementById('tune-etc'),
-  };
-  Object.values(gridMap).forEach(g => { g.innerHTML = ""; });
-
-  const fieldMap = {};
-  tuneFields.forEach(f => { fieldMap[f.key] = f; });
-  const toggleMap = {};
-  toggleFields.forEach(f => { toggleMap[f.key] = f; });
-
-  const addField = (grid, f) => {
-    const val = values[f.key];
-    const title = f.title || f.key;
-    const desc = f.desc || "";
-    const listId = `dl-${f.key}`;
-    const row = document.createElement('div');
-    row.className = "panel";
-    const isFloat = String(f.step).includes(".");
-    const ticks = 5;
-    let options = "";
-    for (let i = 0; i <= ticks; i++) {
-      const v = f.min + ((f.max - f.min) * i / ticks);
-      const txt = isFloat ? v.toFixed(3) : Math.round(v).toString();
-      options += `<option value="${txt}"></option>`;
-    }
-    row.innerHTML = `
-      <div class="label"><strong>${title}</strong></div>
-      <div class="hint">${desc}</div>
-      <div class="tune-row">
-        <input type="range" min="${f.min}" max="${f.max}" step="${f.step}" value="${val}" id="r-${f.key}" list="${listId}">
-        <div class="unit-wrap">
-          <input type="number" min="${f.min}" max="${f.max}" step="${f.step}" value="${val}" id="n-${f.key}">
-          <span class="unit">${f.unit || ""}</span>
-        </div>
-      </div>
-      <datalist id="${listId}">${options}</datalist>
-      <div class="hint">min ${f.min} / max ${f.max}</div>
-    `;
-    grid.appendChild(row);
-
-    const range = row.querySelector(`#r-${f.key}`);
-    const num = row.querySelector(`#n-${f.key}`);
-    range.addEventListener('input', () => { num.value = range.value; });
-    num.addEventListener('input', () => { range.value = num.value; });
-  };
-
-  const addToggle = (grid, f) => {
-    const val = !!values[f.key];
-    const row = document.createElement('div');
-    row.className = "panel";
-    row.innerHTML = `
-      <div class="label"><strong>${f.title}</strong></div>
-      <div class="hint">${f.desc}</div>
-      <label class="switch">
-        <input type="checkbox" id="b-${f.key}" ${val ? "checked" : ""}>
-        <span class="slider"></span>
-      </label>
-    `;
-    grid.appendChild(row);
-  };
-
-  Object.entries(tuneGroups).forEach(([group, keys]) => {
-    const grid = gridMap[group];
-    const toggles = toggleGroups[group] || [];
-    toggles.forEach(k => {
-      const f = toggleMap[k];
-      if (f) addToggle(grid, f);
-    });
-    keys.forEach(k => {
-      const f = fieldMap[k];
-      if (f) addField(grid, f);
-    });
-  });
-}
-
-function formatNum(x, digits = 2){
-  const n = Number(x);
-  if (!Number.isFinite(n)) return "-";
-  return n.toFixed(digits);
-}
-
 async function loadTrades(){
   const lines = document.getElementById('trade-lines').value || 80;
   const url = `/api/trades?lines=${encodeURIComponent(lines)}`;
@@ -604,10 +380,10 @@ async function loadTrades(){
   const stats = j.stats || {};
   const statsEl = document.getElementById('trade-stats');
   statsEl.innerHTML = `
-    <div class="stat"><div class="cap">core added (btc)</div><div class="val">${formatNum(stats.core_added_btc_total, 8)}</div></div>
-    <div class="stat"><div class="cap">last core add (btc)</div><div class="val">${formatNum(stats.core_added_btc_last, 8)}</div></div>
-    <div class="stat"><div class="cap">realized profit (btc eq)</div><div class="val">${formatNum(stats.profit_realized_btc_equiv, 8)}</div></div>
-    <div class="stat"><div class="cap">pending profit (btc eq)</div><div class="val">${formatNum(stats.profit_pool_btc_equiv, 8)}</div></div>
+    <div class="stat"><div class="cap">core bucket (usdt)</div><div class="val">${formatNum(stats.core_bucket_usdt, 2)}</div></div>
+    <div class="stat"><div class="cap">core bucket (btc eq)</div><div class="val">${formatNum(stats.core_bucket_btc_equiv, 8)}</div></div>
+    <div class="stat"><div class="cap">core btc</div><div class="val">${formatNum(stats.core_btc_qty, 8)}</div></div>
+    <div class="stat"><div class="cap">open lots</div><div class="val">${formatNum(stats.open_lots_count, 0)}</div></div>
   `;
 
   const out = document.getElementById('trade-out');
@@ -655,22 +431,11 @@ async function saveTune(){
   const j = await r.json();
   if (!r.ok) {
     document.getElementById('save-status').textContent = j.error || "save failed";
-    openSaveModal("저장 실패: " + (j.error || "unknown"));
     return;
   }
   buildTuneUI(j.values);
   document.getElementById('save-status').textContent = `saved at ${j.updated_at}`;
   document.getElementById('meta').textContent = `tune=${j.updated_at}`;
-  openSaveModal("저장되었습니다.");
-}
-
-function openSaveModal(msg){
-  document.getElementById('save-modal-text').textContent = msg;
-  document.getElementById('save-modal').classList.add('show');
-}
-
-function closeSaveModal(){
-  document.getElementById('save-modal').classList.remove('show');
 }
 
 document.getElementById('mode').addEventListener('change', loadLogs);
@@ -679,8 +444,8 @@ document.getElementById('q').addEventListener('keydown', (e) => { if (e.key === 
 
 setTimer();
 loadLogs();
-loadTune();
 loadTrades();
+loadTune();
 </script>
 </body>
 </html>
@@ -694,9 +459,10 @@ def _get_db() -> BTCDB:
     cfg = BTCConfig()
     db_url = cfg.build_db_url()
     if not db_url:
-        raise RuntimeError("BTC_DB_URL or BTC_DB_* is required for dashboard tuning")
+        raise RuntimeError("BTC_DB_URL or BTC_DB_* is required for dashboard")
     _db = BTCDB(db_url=db_url, verbose=False)
     return _db
+
 
 def _journalctl(lines: int) -> str:
     cmd = [
@@ -710,6 +476,7 @@ def _journalctl(lines: int) -> str:
     ]
     return subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT)
 
+
 def _tag_line(s: str) -> str:
     if ERROR_RE.search(s):
         return "error"
@@ -719,15 +486,17 @@ def _tag_line(s: str) -> str:
         return "trade"
     return "normal"
 
+
 @app.get("/")
 def index():
     return Response(HTML, mimetype="text/html")
 
+
 @app.get("/api/logs")
 def api_logs():
     lines = int(request.args.get("lines", "500"))
-    mode  = request.args.get("mode", "all").lower()
-    q     = (request.args.get("q", "") or "").strip().lower()
+    mode = request.args.get("mode", "all").lower()
+    q = (request.args.get("q", "") or "").strip().lower()
 
     raw = _journalctl(lines)
     rows = [r for r in raw.splitlines() if r.strip()]
@@ -804,23 +573,28 @@ def api_trades():
                 }
             )
 
-        profit_pool_usdt = float(_get_db().get_setting("profit_pool_usdt", 0.0) or 0.0)
-        profit_realized_usdt = float(_get_db().get_setting("profit_realized_usdt", 0.0) or 0.0)
-        core_added_btc_total = float(_get_db().get_setting("profit_core_added_btc_total", 0.0) or 0.0)
-        core_added_btc_last = float(_get_db().get_setting("profit_core_added_btc_last", 0.0) or 0.0)
-        profit_pool_btc_equiv = (profit_pool_usdt / last_price) if last_price else 0.0
-        profit_realized_btc_equiv = (profit_realized_usdt / last_price) if last_price else 0.0
+        core_bucket_usdt = float(_get_db().get_setting("core_bucket_usdt", 0.0) or 0.0)
+        core_btc_qty = float(_get_db().get_setting("reserve_btc_qty", 0.0) or 0.0)
+        core_bucket_btc_equiv = (core_bucket_usdt / last_price) if last_price else 0.0
+
+        open_lots_sql = "SELECT COUNT(*) AS cnt FROM btc_lots WHERE symbol=%s AND status='OPEN'"
+        conn = _get_db().get_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(open_lots_sql, (symbol,))
+                row = cur.fetchone() or {}
+                open_lots_count = int(row.get("cnt") or 0)
+        finally:
+            conn.close()
 
         return jsonify({
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "items": items,
             "stats": {
-                "profit_pool_usdt": profit_pool_usdt,
-                "profit_realized_usdt": profit_realized_usdt,
-                "profit_pool_btc_equiv": profit_pool_btc_equiv,
-                "profit_realized_btc_equiv": profit_realized_btc_equiv,
-                "core_added_btc_total": core_added_btc_total,
-                "core_added_btc_last": core_added_btc_last,
+                "core_bucket_usdt": core_bucket_usdt,
+                "core_bucket_btc_equiv": core_bucket_btc_equiv,
+                "core_btc_qty": core_btc_qty,
+                "open_lots_count": open_lots_count,
             },
         })
     except Exception as e:
@@ -919,6 +693,7 @@ def api_set_tune():
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
 
 if __name__ == "__main__":
     app.run(host=APP_HOST, port=APP_PORT)

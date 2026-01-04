@@ -127,31 +127,26 @@ class BTCClient:
         # Binance clientOrderId 제한(보통 32~36자) 걸릴 수 있으니 짧게
         return f"BTCSTACK_{tag}_{int(time.time()*1000)}"
 
-    def place_market_buy_by_quote(self, quote_usdt: float, symbol: Optional[str] = None, client_oid: Optional[str] = None):
-        sym = symbol or self.symbol
-        coid = client_oid or self._make_client_oid("BUY")
-        return self.client.order_market_buy(
-            symbol=sym,
-            quoteOrderQty=f"{float(quote_usdt):.8f}",
-            newClientOrderId=coid,
-        )
-
-    def place_market_sell(self, qty_base: float, symbol: Optional[str] = None, client_oid: Optional[str] = None):
-        sym = symbol or self.symbol
-        qty = self.adjust_qty(qty_base, sym)
-        coid = client_oid or self._make_client_oid("SELL")
-        return self.client.order_market_sell(
-            symbol=sym,
-            quantity=f"{qty:.8f}",
-            newClientOrderId=coid,
-        )
-
     def place_limit_sell(self, qty_base: float, price: float, symbol: Optional[str] = None, client_oid: Optional[str] = None):
         sym = symbol or self.symbol
         qty = self.adjust_qty(qty_base, sym)
         px = self.adjust_price(price, sym)
         coid = client_oid or self._make_client_oid("TP")
         return self.client.order_limit_sell(
+            symbol=sym,
+            quantity=f"{qty:.8f}",
+            price=f"{px:.8f}",
+            timeInForce="GTC",
+            newClientOrderId=coid,
+        )
+
+    def place_limit_buy_by_quote(self, quote_usdt: float, price: float, symbol: Optional[str] = None, client_oid: Optional[str] = None):
+        sym = symbol or self.symbol
+        px = self.adjust_price(price, sym)
+        qty = (float(quote_usdt) / px) if px > 0 else 0.0
+        qty = self.adjust_qty(qty, sym)
+        coid = client_oid or self._make_client_oid("LBUY")
+        return self.client.order_limit_buy(
             symbol=sym,
             quantity=f"{qty:.8f}",
             price=f"{px:.8f}",

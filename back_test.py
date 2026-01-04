@@ -19,9 +19,6 @@ class BTCBacktestConfig:
 
     # Mode / Logging
     verbose: bool = False
-    ai_enable_report: bool = True
-    ai_enable_gate: bool = True
-    ai_enable_tune: bool = True
 
     # Symbol
     symbol: str = "BTCUSDT"
@@ -35,7 +32,7 @@ class BTCBacktestConfig:
     initial_buy_ratio: float = 0.30
     initial_buy_usdt: Optional[float] = None
     initial_entry_usdt: Optional[float] = None
-    initial_reserve_ratio: float = 0.80
+    initial_core_usdt: float = 2000.0
     reserve_btc_key: str = "reserve_btc_qty"
 
     # Execution Assumptions
@@ -51,53 +48,13 @@ class BTCBacktestConfig:
     # Order ID Prefix (pool tagging)
     client_order_prefix: str = "BTCSTACK_"
 
-    # Strategy (Stacking/Grid)
-    grid_step_pct: float = 0.02
-    take_profit_pct: float = 0.020
-    buy_quote_usdt: float = 20.0
-    sell_fraction_on_tp: float = 0.15
+    # Lot stacking
+    lot_buy_usdt: float = 100.0
+    lot_tp_pct: float = 0.03
+    lot_drop_pct: float = 0.01
+    lot_prebuy_pct: float = 0.0015
+    lot_cancel_rebound_pct: float = 0.004
     min_trade_usdt: float = 0.0
-
-    # TP as LIMIT
-    use_tp_limit_orders: bool = True
-    tp_refresh_sec: int = 30
-    tp_price_bump_ticks: int = 0
-    trailing_sell_enable: bool = False
-    trailing_activate_pct: float = 0.02
-    trailing_ratio: float = 0.70
-
-    # Buy sizing
-    fixed_grid_buy: bool = True
-    grid_buy_usdt: float = 20.0
-    dynamic_buy: bool = True
-    buy_min_usdt: float = 5.0
-    buy_max_usdt: float = 60.0
-    exposure_power: float = 1.6
-    price_vol_window: int = 30
-    vol_low: float = 0.005
-    vol_high: float = 0.012
-    vol_boost_max: float = 1.25
-    vol_cut_min: float = 0.70
-
-    # Risk / Limits
-    max_quote_exposure_usdt: float = 1e18
-
-    # Base price recentering
-    recenter_threshold_pct: float = 0.020
-    recenter_cooldown_sec: int = 60
-
-    # Simple recenter grid (fixed buy/sell)
-    simple_recenter_mode: bool = True
-    simple_recenter_pct: float = 0.010
-    simple_recenter_buy_pct: float = 0.010
-    simple_recenter_sell_pct: float = 0.015
-    simple_recenter_buy_usdt: float = 50.0
-    simple_recenter_sell_usdt: float = 50.0
-
-    # Crash-aware sizing
-    crash_drop_pct: float = 0.035
-    crash_vol_threshold: float = 0.015
-    crash_grid_mult: float = 2.0
 
     # Timing
     order_cooldown_sec: int = 7
@@ -129,10 +86,6 @@ class BTCBacktestConfig:
 
         return cls(
             verbose=b("VERBOSE", cls.verbose),
-            ai_enable_report=b("AI_ENABLE_REPORT", cls.ai_enable_report),
-            ai_enable_gate=b("AI_ENABLE_GATE", cls.ai_enable_gate),
-            ai_enable_tune=b("AI_ENABLE_TUNE", cls.ai_enable_tune),
-
             symbol=s("SYMBOL", cls.symbol),
             base_asset=s("BASE_ASSET", cls.base_asset),
             quote_asset=s("QUOTE_ASSET", cls.quote_asset),
@@ -143,7 +96,7 @@ class BTCBacktestConfig:
             initial_buy_ratio=f("INITIAL_BUY_RATIO", cls.initial_buy_ratio),
             initial_buy_usdt=f("INITIAL_BUY_USDT", cls.initial_buy_usdt) if os.getenv("BT_INITIAL_BUY_USDT") is not None else cls.initial_buy_usdt,
             initial_entry_usdt=f("INITIAL_ENTRY_USDT", cls.initial_entry_usdt) if os.getenv("BT_INITIAL_ENTRY_USDT") is not None else None,
-            initial_reserve_ratio=f("INITIAL_RESERVE_RATIO", cls.initial_reserve_ratio),
+            initial_core_usdt=f("INITIAL_CORE_USDT", cls.initial_core_usdt),
             reserve_btc_key=s("RESERVE_BTC_KEY", cls.reserve_btc_key),
 
             slippage_bps=f("SLIPPAGE_BPS", cls.slippage_bps),
@@ -156,52 +109,19 @@ class BTCBacktestConfig:
 
             client_order_prefix=s("CLIENT_ORDER_PREFIX", cls.client_order_prefix),
 
-            grid_step_pct=f("GRID_STEP_PCT", cls.grid_step_pct),
-            take_profit_pct=f("TAKE_PROFIT_PCT", cls.take_profit_pct),
-            buy_quote_usdt=f("BUY_QUOTE_USDT", cls.buy_quote_usdt),
-            sell_fraction_on_tp=f("SELL_FRACTION_ON_TP", cls.sell_fraction_on_tp),
-            min_trade_usdt=f("MIN_TRADE_USDT", cls.min_trade_usdt),
-
-            use_tp_limit_orders=b("USE_TP_LIMIT_ORDERS", cls.use_tp_limit_orders),
-            tp_refresh_sec=i("TP_REFRESH_SEC", cls.tp_refresh_sec),
-            tp_price_bump_ticks=i("TP_PRICE_BUMP_TICKS", cls.tp_price_bump_ticks),
-            trailing_sell_enable=b("TRAILING_SELL_ENABLE", cls.trailing_sell_enable),
-            trailing_activate_pct=f("TRAILING_ACTIVATE_PCT", cls.trailing_activate_pct),
-            trailing_ratio=f("TRAILING_RATIO", cls.trailing_ratio),
-
-            fixed_grid_buy=b("FIXED_GRID_BUY", cls.fixed_grid_buy),
-            grid_buy_usdt=f("GRID_BUY_USDT", cls.grid_buy_usdt),
-            dynamic_buy=b("DYNAMIC_BUY", cls.dynamic_buy),
-            buy_min_usdt=f("BUY_MIN_USDT", cls.buy_min_usdt),
-            buy_max_usdt=f("BUY_MAX_USDT", cls.buy_max_usdt),
-            exposure_power=f("EXPOSURE_POWER", cls.exposure_power),
-            price_vol_window=i("PRICE_VOL_WINDOW", cls.price_vol_window),
-            vol_low=f("VOL_LOW", cls.vol_low),
-            vol_high=f("VOL_HIGH", cls.vol_high),
-            vol_boost_max=f("VOL_BOOST_MAX", cls.vol_boost_max),
-            vol_cut_min=f("VOL_CUT_MIN", cls.vol_cut_min),
-
-            max_quote_exposure_usdt=f("MAX_QUOTE_EXPOSURE_USDT", cls.max_quote_exposure_usdt),
-
-            recenter_threshold_pct=f("RECENTER_THRESHOLD_PCT", cls.recenter_threshold_pct),
-            recenter_cooldown_sec=i("RECENTER_COOLDOWN_SEC", cls.recenter_cooldown_sec),
-            simple_recenter_mode=b("SIMPLE_RECENTER_MODE", cls.simple_recenter_mode),
-            simple_recenter_pct=f("SIMPLE_RECENTER_PCT", cls.simple_recenter_pct),
-            simple_recenter_buy_pct=f("SIMPLE_RECENTER_BUY_PCT", cls.simple_recenter_buy_pct),
-            simple_recenter_sell_pct=f("SIMPLE_RECENTER_SELL_PCT", cls.simple_recenter_sell_pct),
-            simple_recenter_buy_usdt=f("SIMPLE_RECENTER_BUY_USDT", cls.simple_recenter_buy_usdt),
-            simple_recenter_sell_usdt=f("SIMPLE_RECENTER_SELL_USDT", cls.simple_recenter_sell_usdt),
-
-            crash_drop_pct=f("CRASH_DROP_PCT", cls.crash_drop_pct),
-            crash_vol_threshold=f("CRASH_VOL_THRESHOLD", cls.crash_vol_threshold),
-            crash_grid_mult=f("CRASH_GRID_MULT", cls.crash_grid_mult),
-
             order_cooldown_sec=i("ORDER_COOLDOWN_SEC", cls.order_cooldown_sec),
             loop_interval_sec=i("LOOP_INTERVAL_SEC", cls.loop_interval_sec),
 
             trade_cap_ratio=f("TRADE_CAP_RATIO", cls.trade_cap_ratio),
             usdt_reserve_buffer=f("USDT_RESERVE_BUFFER", cls.usdt_reserve_buffer),
             use_fixed_usdt_reference=b("USE_FIXED_USDT_REFERENCE", cls.use_fixed_usdt_reference),
+
+            lot_buy_usdt=f("LOT_BUY_USDT", cls.lot_buy_usdt),
+            lot_tp_pct=f("LOT_TP_PCT", cls.lot_tp_pct),
+            lot_drop_pct=f("LOT_DROP_PCT", cls.lot_drop_pct),
+            lot_prebuy_pct=f("LOT_PREBUY_PCT", cls.lot_prebuy_pct),
+            lot_cancel_rebound_pct=f("LOT_CANCEL_REBOUND_PCT", cls.lot_cancel_rebound_pct),
+            min_trade_usdt=f("MIN_TRADE_USDT", cls.min_trade_usdt),
         )
 
 
@@ -284,8 +204,6 @@ class BacktestClient:
         self.stats["init_btc"] = float(init_btc)
         self.stats["market_buy_orders"] = 0.0
         self.stats["market_sell_orders"] = 0.0
-        self.stats["tp_limit_orders"] = 0.0
-        self.stats["tp_limit_fills"] = 0.0
         self.stats["cancels"] = 0.0
         self.stats["fee_total"] = 0.0
         self.stats["buy_spent_total"] = 0.0
@@ -312,8 +230,8 @@ class BacktestClient:
 
     def match_open_orders(self):
         """
-        현재 봉의 high를 이용해 limit SELL 체결 처리.
-        (단순화: high >= limit_price 면 전량 체결)
+        현재 봉의 low/high를 이용해 limit BUY/SELL 체결 처리.
+        (단순화: 조건 충족 시 전량 체결)
         """
         for oid, o in list(self._orders.items()):
             if o.get("symbol") != self.symbol:
@@ -322,15 +240,15 @@ class BacktestClient:
                 continue
             if o.get("type") != "LIMIT":
                 continue
-            if o.get("side") != "SELL":
-                continue
 
             price = float(o.get("price") or 0.0)
             qty = float(o.get("origQty") or 0.0)
             if price <= 0 or qty <= 0:
                 continue
 
-            if self.cur_high >= price:
+            if o.get("side") == "BUY" and self.cur_low <= price:
+                self._fill_limit_buy(oid, price=price, qty=qty)
+            elif o.get("side") == "SELL" and self.cur_high >= price:
                 self._fill_limit_sell(oid, price=price, qty=qty)
 
     # ----------------------------
@@ -388,13 +306,19 @@ class BacktestClient:
 
         self.stats["cancels"] += 1.0
 
-        # SELL LIMIT만 lock 해제
-        if o.get("type") == "LIMIT" and o.get("side") == "SELL":
-            qty = float(o.get("origQty") or 0.0)
-            qty = max(0.0, qty)
-            unlock = min(self._base_locked, qty)
-            self._base_locked -= unlock
-            self._base_free += unlock
+        # LIMIT 주문 lock 해제
+        if o.get("type") == "LIMIT":
+            if o.get("side") == "SELL":
+                qty = float(o.get("origQty") or 0.0)
+                qty = max(0.0, qty)
+                unlock = min(self._base_locked, qty)
+                self._base_locked -= unlock
+                self._base_free += unlock
+            elif o.get("side") == "BUY":
+                locked = float(o.get("lockedQuote") or 0.0)
+                unlock = min(self._quote_locked, locked)
+                self._quote_locked -= unlock
+                self._quote_free += unlock
 
         o["status"] = "CANCELED"
         self._orders[oid] = o
@@ -413,155 +337,55 @@ class BacktestClient:
         self._next_order_id += 1
         return self._next_order_id
 
-    def place_market_buy_by_quote(
+    def place_limit_buy_by_quote(
         self,
         *,
         quote_usdt: float,
+        price: float,
         symbol: str,
         clientOrderId: Optional[str] = None,
     ) -> Dict[str, Any]:
         assert symbol == self.symbol
-        q = float(quote_usdt)
-        if q <= 0:
-            raise ValueError("quote_usdt must be > 0")
+        px = self.adjust_price(float(price), symbol)
+        if px <= 0:
+            raise ValueError("price must be > 0")
 
-        if q > self._quote_free + 1e-12:
-            raise ValueError(f"insufficient {self.quote_asset} free: need={q:.8f}, have={self._quote_free:.8f}")
-
-        px = float(self.cur_close) * (1.0 + self.slippage_bps / 10000.0)
-        px = self.adjust_price(px, symbol)
-
-        # 수수료를 quote에서 차감한다고 가정
-        fee_q = q * self.taker_fee_rate
-        q_net = max(0.0, q - fee_q)
-
-        qty = (q_net / px) if px > 0 else 0.0
+        qty = float(quote_usdt) / px
         qty = self.adjust_qty(qty, symbol)
+        if qty <= 0:
+            raise ValueError("qty must be > 0")
 
         notional = qty * px
         if notional < max(self.filters.min_notional, 0.0):
             raise ValueError(f"min_notional not met: notional={notional:.4f}")
 
-        # step에 맞추며 notional 줄 수 있으니 재계산
-        spent = qty * px
-        fee_q = spent * self.taker_fee_rate
-        total_spent = spent + fee_q
-        if total_spent > self._quote_free + 1e-12:
-            raise ValueError("insufficient free after rounding")
+        fee_q = notional * self.maker_fee_rate
+        total = notional + fee_q
+        if total > self._quote_free + 1e-12:
+            raise ValueError(f"insufficient {self.quote_asset} free: need={total:.8f}, have={self._quote_free:.8f}")
 
         oid = self._new_order_id()
         coid = clientOrderId or f"{self.client_order_prefix}{oid}"
+
+        self._quote_free -= total
+        self._quote_locked += total
 
         order = {
             "symbol": symbol,
             "orderId": oid,
             "clientOrderId": coid,
             "transactTime": int(self.cur_ts * 1000),
-            "price": "0",
+            "price": f"{px:.8f}",
             "origQty": f"{qty:.8f}",
-            "executedQty": f"{qty:.8f}",
-            "cummulativeQuoteQty": f"{spent:.8f}",
-            "status": "FILLED",
+            "executedQty": "0",
+            "cummulativeQuoteQty": "0",
+            "status": "NEW",
             "timeInForce": "GTC",
-            "type": "MARKET",
+            "type": "LIMIT",
             "side": "BUY",
+            "lockedQuote": f"{total:.8f}",
         }
         self._orders[oid] = order
-
-        self._quote_free -= total_spent
-        self._base_free += qty
-
-        # stats
-        self.stats["market_buy_orders"] += 1.0
-        self.stats["fee_total"] += float(fee_q)
-        self.stats["buy_spent_total"] += float(spent)
-        self.stats["buy_fee_total"] += float(fee_q)
-
-        trade = {
-            "symbol": symbol,
-            "id": len(self._fills) + 1,
-            "orderId": oid,
-            "price": f"{px:.8f}",
-            "qty": f"{qty:.8f}",
-            "quoteQty": f"{spent:.8f}",
-            "commission": f"{fee_q:.8f}",
-            "commissionAsset": self.quote_asset,
-            "time": int(self.cur_ts * 1000),
-            "isBuyer": True,
-            "isMaker": False,
-        }
-        self._fills.append(trade)
-
-        return order.copy()
-
-    def place_market_sell(
-        self,
-        *,
-        qty_base: float,
-        symbol: str,
-        clientOrderId: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        assert symbol == self.symbol
-        qty = self.adjust_qty(float(qty_base), symbol)
-        if qty <= 0:
-            raise ValueError("qty_base must be > 0")
-
-        if qty > self._base_free + 1e-12:
-            raise ValueError(f"insufficient {self.base_asset} free: need={qty:.8f}, have={self._base_free:.8f}")
-
-        px = float(self.cur_close) * (1.0 - self.slippage_bps / 10000.0)
-        px = self.adjust_price(px, symbol)
-
-        gross = qty * px
-        if gross < max(self.filters.min_notional, 0.0):
-            raise ValueError(f"min_notional not met: notional={gross:.4f}")
-
-        fee_q = gross * self.taker_fee_rate
-        net = max(0.0, gross - fee_q)
-
-        oid = self._new_order_id()
-        coid = clientOrderId or f"{self.client_order_prefix}{oid}"
-
-        order = {
-            "symbol": symbol,
-            "orderId": oid,
-            "clientOrderId": coid,
-            "transactTime": int(self.cur_ts * 1000),
-            "price": "0",
-            "origQty": f"{qty:.8f}",
-            "executedQty": f"{qty:.8f}",
-            "cummulativeQuoteQty": f"{gross:.8f}",
-            "status": "FILLED",
-            "timeInForce": "GTC",
-            "type": "MARKET",
-            "side": "SELL",
-        }
-        self._orders[oid] = order
-
-        self._base_free -= qty
-        self._quote_free += net
-
-        # stats
-        self.stats["market_sell_orders"] += 1.0
-        self.stats["fee_total"] += float(fee_q)
-        self.stats["sell_gross_total"] += float(gross)
-        self.stats["sell_fee_total"] += float(fee_q)
-
-        trade = {
-            "symbol": symbol,
-            "id": len(self._fills) + 1,
-            "orderId": oid,
-            "price": f"{px:.8f}",
-            "qty": f"{qty:.8f}",
-            "quoteQty": f"{gross:.8f}",
-            "commission": f"{fee_q:.8f}",
-            "commissionAsset": self.quote_asset,
-            "time": int(self.cur_ts * 1000),
-            "isBuyer": False,
-            "isMaker": False,
-        }
-        self._fills.append(trade)
-
         return order.copy()
 
     def place_limit_sell(
@@ -588,7 +412,6 @@ class BacktestClient:
         if qty > self._base_free + 1e-12:
             raise ValueError(f"insufficient {self.base_asset} free: need={qty}, have={self._base_free}")
 
-        # lock base
         self._base_free -= qty
         self._base_locked += qty
 
@@ -610,9 +433,51 @@ class BacktestClient:
             "side": "SELL",
         }
         self._orders[oid] = order
-
-        self.stats["tp_limit_orders"] += 1.0
         return order.copy()
+
+    def _fill_limit_buy(self, oid: int, *, price: float, qty: float):
+        o = self._orders.get(int(oid))
+        if not o:
+            return
+        if o.get("status") not in ("NEW", "PARTIALLY_FILLED"):
+            return
+
+        px = self.adjust_price(price, self.symbol)
+        qty = self.adjust_qty(qty, self.symbol)
+
+        gross = qty * px
+        fee_q = gross * self.maker_fee_rate
+        total = gross + fee_q
+
+        unlock = min(self._quote_locked, float(o.get("lockedQuote") or 0.0))
+        self._quote_locked -= unlock
+        self._quote_free += max(0.0, unlock - total)
+        self._base_free += qty
+
+        o["status"] = "FILLED"
+        o["executedQty"] = f"{qty:.8f}"
+        o["cummulativeQuoteQty"] = f"{gross:.8f}"
+        self._orders[int(oid)] = o
+
+        self.stats["fee_total"] += float(fee_q)
+        self.stats["buy_spent_total"] += float(gross)
+        self.stats["buy_fee_total"] += float(fee_q)
+
+        trade = {
+            "symbol": self.symbol,
+            "id": len(self._fills) + 1,
+            "orderId": int(oid),
+            "price": f"{px:.8f}",
+            "qty": f"{qty:.8f}",
+            "quoteQty": f"{gross:.8f}",
+            "commission": f"{fee_q:.8f}",
+            "commissionAsset": self.quote_asset,
+            "time": int(self.cur_ts * 1000),
+            "isBuyer": True,
+            "isMaker": True,
+        }
+        self._fills.append(trade)
+        self.stats["market_buy_orders"] += 1.0
 
     def _fill_limit_sell(self, oid: int, *, price: float, qty: float):
         o = self._orders.get(int(oid))
@@ -628,19 +493,15 @@ class BacktestClient:
         fee_q = gross * self.maker_fee_rate
         net = gross - fee_q
 
-        # balances
         unlock = min(self._base_locked, qty)
         self._base_locked -= unlock
         self._quote_free += net
 
-        # order update
         o["status"] = "FILLED"
         o["executedQty"] = f"{qty:.8f}"
         o["cummulativeQuoteQty"] = f"{gross:.8f}"
         self._orders[int(oid)] = o
 
-        # stats
-        self.stats["tp_limit_fills"] += 1.0
         self.stats["fee_total"] += float(fee_q)
         self.stats["sell_gross_total"] += float(gross)
         self.stats["sell_fee_total"] += float(fee_q)
@@ -659,6 +520,7 @@ class BacktestClient:
             "isMaker": True,
         }
         self._fills.append(trade)
+        self.stats["market_sell_orders"] += 1.0
 
 
 @dataclass
@@ -684,10 +546,10 @@ class BacktestDB:
 
         self._orders: Dict[int, Dict[str, Any]] = {}
         self._fills: List[Dict[str, Any]] = []
-        self._ai_events: List[Dict[str, Any]] = []
+        self._lots: List[Dict[str, Any]] = []
+        self._next_lot_id = 1
 
         self._pos_by_symbol: Dict[str, PositionSnapshot] = {}
-        self._pool_pos_by_symbol: Dict[str, PositionSnapshot] = {}
 
     # ----------------------------
     # logging/settings
@@ -731,15 +593,87 @@ class BacktestDB:
             self.log("INFO", f"TRAIL fill: side={side} qty={rec.get('qty')} price={rec.get('price')}")
 
     # ----------------------------
-    # ai events
+    # lots
     # ----------------------------
-    def insert_ai_event(self, kind: str, symbol: str, payload: Dict[str, Any]):
-        self._ai_events.append({"kind": kind, "symbol": symbol, "payload": dict(payload)})
+    def insert_lot(
+        self,
+        *,
+        symbol: str,
+        buy_price: float,
+        buy_btc_qty: float,
+        buy_time_ms: Optional[int] = None,
+        status: str = "OPEN",
+    ) -> int:
+        lot_id = self._next_lot_id
+        self._next_lot_id += 1
+        rec = {
+            "lot_id": lot_id,
+            "symbol": symbol,
+            "buy_price": float(buy_price),
+            "buy_btc_qty": float(buy_btc_qty),
+            "buy_time_ms": int(buy_time_ms) if buy_time_ms is not None else None,
+            "status": status,
+            "sell_order_id": None,
+            "sell_order_time_ms": None,
+            "sell_price": None,
+            "sell_time_ms": None,
+            "fee_usdt": None,
+            "net_profit_usdt": None,
+        }
+        self._lots.append(rec)
+        return lot_id
+
+    def get_open_lots(self, symbol: str) -> List[Dict[str, Any]]:
+        out = []
+        for lot in self._lots:
+            if lot.get("symbol") != symbol:
+                continue
+            if lot.get("status") != "OPEN":
+                continue
+            out.append(dict(lot))
+        out.sort(key=lambda x: (x.get("buy_time_ms") or 0, x.get("lot_id") or 0))
+        return out
+
+    def close_lot(
+        self,
+        *,
+        lot_id: int,
+        sell_price: float,
+        sell_time_ms: Optional[int] = None,
+        fee_usdt: float = 0.0,
+        net_profit_usdt: float = 0.0,
+        status: str = "CLOSED",
+    ):
+        for lot in self._lots:
+            if int(lot.get("lot_id") or 0) != int(lot_id):
+                continue
+            lot["status"] = status
+            lot["sell_price"] = float(sell_price)
+            lot["sell_time_ms"] = int(sell_time_ms) if sell_time_ms is not None else None
+            lot["fee_usdt"] = float(fee_usdt)
+            lot["net_profit_usdt"] = float(net_profit_usdt)
+            break
+
+    def set_lot_sell_order(self, *, lot_id: int, order_id: int, order_time_ms: Optional[int] = None):
+        for lot in self._lots:
+            if int(lot.get("lot_id") or 0) != int(lot_id):
+                continue
+            lot["sell_order_id"] = int(order_id)
+            lot["sell_order_time_ms"] = int(order_time_ms) if order_time_ms is not None else None
+            break
+
+    def clear_lot_sell_order(self, *, lot_id: int):
+        for lot in self._lots:
+            if int(lot.get("lot_id") or 0) != int(lot_id):
+                continue
+            lot["sell_order_id"] = None
+            lot["sell_order_time_ms"] = None
+            break
 
     # ----------------------------
     # positions
     # ----------------------------
-    def _recompute_position(self, symbol: str, *, client_prefix: Optional[str] = None) -> PositionSnapshot:
+    def _recompute_position(self, symbol: str) -> PositionSnapshot:
         """
         단순 평균단가 기반 포지션 계산:
         - BUY: cost_basis += quoteQty (=gross)
@@ -756,12 +690,6 @@ class BacktestDB:
             oid = int(f.get("orderId") or 0)
             if oid <= 0:
                 continue
-
-            if client_prefix is not None:
-                o = self._orders.get(oid)
-                cid = (o or {}).get("clientOrderId", "") or ""
-                if not str(cid).startswith(str(client_prefix)):
-                    continue
 
             f_qty = float(f.get("qty") or 0.0)
             f_quote = float(f.get("quoteQty") or 0.0)
@@ -786,80 +714,13 @@ class BacktestDB:
 
         return PositionSnapshot(symbol=symbol, btc_qty=float(qty), avg_entry=float(avg), cost_basis_usdt=float(cost))
 
-    def compute_trailing_stats(self, symbol: str, tag: str = "TRAIL") -> Dict[str, float]:
-        qty = 0.0
-        cost = 0.0
-        profits: List[float] = []
-
-        def _trade_key(t: Dict[str, Any]) -> tuple[int, int]:
-            return (int(t.get("time") or 0), int(t.get("id") or 0))
-
-        for f in sorted(self._fills, key=_trade_key):
-            if f.get("symbol") != symbol:
-                continue
-            is_buyer = bool(f.get("isBuyer"))
-            f_qty = float(f.get("qty") or 0.0)
-            f_quote = float(f.get("quoteQty") or 0.0)
-            if f_qty <= 0:
-                continue
-
-            if is_buyer:
-                qty += f_qty
-                cost += f_quote
-                continue
-
-            if qty <= 1e-12:
-                continue
-
-            avg = cost / qty if qty > 0 else 0.0
-            sold = min(qty, f_qty)
-            profit = f_quote - (avg * sold)
-
-            oid = int(f.get("orderId") or 0)
-            o = self._orders.get(oid) or {}
-            cid = (o.get("clientOrderId") or "")
-            if tag in str(cid):
-                profits.append(profit)
-
-            cost -= avg * sold
-            qty -= sold
-            if qty <= 1e-12:
-                qty = 0.0
-                cost = 0.0
-
-        count = float(len(profits))
-        total = float(sum(profits)) if profits else 0.0
-        avg_profit = float(total / count) if count > 0 else 0.0
-        wins = [p for p in profits if p > 0]
-        losses = [p for p in profits if p < 0]
-        win_rate = float(len(wins) / count) if count > 0 else 0.0
-        avg_win = float(sum(wins) / len(wins)) if wins else 0.0
-        avg_loss = float(sum(losses) / len(losses)) if losses else 0.0
-
-        return {
-            "trailing_sell_count": count,
-            "trailing_profit_total": total,
-            "trailing_profit_avg": avg_profit,
-            "trailing_win_rate": win_rate,
-            "trailing_win_avg": avg_win,
-            "trailing_loss_avg": avg_loss,
-        }
-
     def recompute_position_from_fills(self, symbol: str) -> PositionSnapshot:
-        snap = self._recompute_position(symbol, client_prefix=None)
+        snap = self._recompute_position(symbol)
         self._pos_by_symbol[symbol] = snap
-        return snap
-
-    def recompute_pool_position_from_fills(self, symbol: str, client_prefix: str = "BTCSTACK_") -> PositionSnapshot:
-        snap = self._recompute_position(symbol, client_prefix=client_prefix)
-        self._pool_pos_by_symbol[symbol] = snap
         return snap
 
     def get_position(self, symbol: str) -> PositionSnapshot:
         return self._pos_by_symbol.get(symbol, PositionSnapshot(symbol, 0.0, 0.0, 0.0))
-
-    def get_pool_position(self, symbol: str) -> PositionSnapshot:
-        return self._pool_pos_by_symbol.get(symbol, PositionSnapshot(symbol, 0.0, 0.0, 0.0))
 
 
 def run_backtest(df: pd.DataFrame, *, cfg: BTCBacktestConfig) -> Tuple[pd.DataFrame, Dict[str, Any]]:
@@ -953,15 +814,8 @@ def run_backtest(df: pd.DataFrame, *, cfg: BTCBacktestConfig) -> Tuple[pd.DataFr
 
     stats = client.get_stats()
 
-    total_buy_orders = int(stats.get("market_buy_orders", 0))
-    total_buy_spent = float(stats.get("buy_spent_total", 0.0))
-
-    grid_buy_count = max(0, total_buy_orders - (1 if initial_executed else 0))
-    grid_buy_spent_total = max(0.0, total_buy_spent - (init_buy_spent if initial_executed else 0.0))
-
     market_sell_count = int(stats.get("market_sell_orders", 0))
-    # 매도 횟수 = TP 지정가 체결 + 시장가 매도
-    sell_count = market_sell_count + int(stats.get("tp_limit_fills", 0))
+    sell_count = market_sell_count
 
     # 마지막 종가/지표들
     first_close = float(out["close"].iloc[0])
@@ -979,10 +833,18 @@ def run_backtest(df: pd.DataFrame, *, cfg: BTCBacktestConfig) -> Tuple[pd.DataFr
     btc_delta = btc_end - btc_start
     btc_delta_pct = (btc_delta / btc_start * 100.0) if btc_start > 0 else None
     btc_equiv_end = btc_end
-    buy_fail = int(db.get_setting("grid_buy_fail_insufficient", 0) or 0)
-    sell_fail = int(db.get_setting("grid_sell_fail_insufficient", 0) or 0)
+    total_buy_spent = float(stats.get("buy_spent_total", 0.0))
+    total_sell_gross = float(stats.get("sell_gross_total", 0.0))
+    total_sell_fee = float(stats.get("sell_fee_total", 0.0))
+    total_sell_net = total_sell_gross - total_sell_fee
+    add_buy_spent = max(0.0, total_buy_spent - (init_buy_spent if initial_executed else 0.0))
+    end_bal = client.get_balance(cfg.quote_asset)
+    end_usdt_free = float(end_bal.get("free", 0.0))
+    end_usdt_locked = float(end_bal.get("locked", 0.0))
+    core_btc_qty = float(db.get_setting(cfg.reserve_btc_key, 0.0) or 0.0)
+    core_btc_initial = float(db.get_setting("core_btc_initial", 0.0) or 0.0)
+    core_btc_added = core_btc_qty - core_btc_initial
 
-    trailing_stats = db.compute_trailing_stats(cfg.symbol)
     summary = {
         "first_buy_dt": str(first_buy_dt) if first_buy_dt is not None else None,
         "end_dt": str(out["dt"].iloc[-1]),
@@ -990,12 +852,18 @@ def run_backtest(df: pd.DataFrame, *, cfg: BTCBacktestConfig) -> Tuple[pd.DataFr
         "btc_start": btc_start,
         "btc_end": btc_end,
         "equity_end_usdt": equity_end_usdt,
-        "reserve_btc_qty": float(db.get_setting(cfg.reserve_btc_key, 0.0) or 0.0),
+        "reserve_btc_qty": core_btc_qty,
         "reserve_cost_usdt": float(db.get_setting("reserve_cost_usdt", 0.0) or 0.0),
+        "core_bucket_usdt": float(db.get_setting("core_bucket_usdt", 0.0) or 0.0),
+        "open_lots_count": int(len(db.get_open_lots(cfg.symbol))),
         "fee_total": float(stats.get("fee_total", 0.0)),
+        "add_buy_spent_usdt": add_buy_spent,
+        "sell_net_usdt": total_sell_net,
+        "end_usdt_free": end_usdt_free,
+        "end_usdt_locked": end_usdt_locked,
+        "core_btc_initial": core_btc_initial,
+        "core_btc_added": core_btc_added,
 
-        "grid_buy_count": int(grid_buy_count),
-        "grid_buy_spent_total": float(grid_buy_spent_total),
         "sell_count": int(sell_count),
 
         "btc_start_after_first_buy": float(btc_at_first_buy or 0.0),
@@ -1013,20 +881,11 @@ def run_backtest(df: pd.DataFrame, *, cfg: BTCBacktestConfig) -> Tuple[pd.DataFr
         "end_btc_equiv_total": float(end_btc_equiv_total),
         "btc_equiv_delta": float(btc_equiv_delta),
         "btc_equiv_delta_pct": btc_equiv_delta_pct,
-        "trade_fail_insufficient_buy": buy_fail,
-        "trade_fail_insufficient_sell": sell_fail,
-        "trade_fail_insufficient_total": buy_fail + sell_fail,
-        **trailing_stats,
-
         "trades": {
             "market_buys": int(stats.get("market_buy_orders", 0)),
             "market_sells": int(stats.get("market_sell_orders", 0)),
-            "tp_limit_orders": int(stats.get("tp_limit_orders", 0)),
-            "tp_fills": int(stats.get("tp_limit_fills", 0)),
             "cancels": int(stats.get("cancels", 0)),
         },
         "stats": stats,
     }
-    for k, v in trailing_stats.items():
-        out[k] = v
     return out, summary

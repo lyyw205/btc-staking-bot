@@ -2,12 +2,10 @@
 
 ## 프로젝트 구조
 - `btc_run.py`: 실거래 실행 엔트리 포인트.
-- `btc_trader.py`: 스태킹/그리드 전략 핵심 로직과 루프.
+- `btc_trader.py`: 로트 스태킹 전략 핵심 로직과 루프.
 - `btc_config.py`: 실거래 환경변수 기반 설정 로더.
 - `btc_client.py`: 거래소 API 연동 클라이언트.
 - `btc_db_manager.py`: 거래/상태 저장을 위한 DB 매니저.
-- `btc_ai.py`: 보조 분석/AI 관련 로직.
-
 - `backtest_run.py`: 백테스트 실행 스크립트, `artifacts/backtest_equity.csv` 출력.
 - `back_test.py`: 백테스트 엔진 + 설정 + 모의 거래소/DB (통합).
 

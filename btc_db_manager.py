@@ -90,21 +90,22 @@ class BTCDB:
                         );
                        
 
-                        CREATE TABLE IF NOT EXISTS btc_pool_position (
-                            symbol TEXT PRIMARY KEY,
-                            btc_qty NUMERIC NOT NULL,
-                            cost_basis_usdt NUMERIC NOT NULL,
-                            avg_entry NUMERIC NOT NULL,
-                            updated_at TIMESTAMPTZ DEFAULT now()
-                            );
-
-                        CREATE TABLE IF NOT EXISTS btc_ai_events (
-                            id BIGSERIAL PRIMARY KEY,
-                            kind TEXT NOT NULL,          -- 'REPORT' | 'GATE' | 'TUNE'
-                            symbol TEXT NOT NULL,
-                            payload JSONB,
-                            inserted_at TIMESTAMPTZ DEFAULT now()
-                            );
+                        CREATE TABLE IF NOT EXISTS btc_lots (
+                          lot_id BIGSERIAL PRIMARY KEY,
+                          symbol TEXT NOT NULL,
+                          buy_price NUMERIC NOT NULL,
+                          buy_btc_qty NUMERIC NOT NULL,
+                          buy_time TIMESTAMPTZ DEFAULT now(),
+                          buy_time_ms BIGINT,
+                          status TEXT DEFAULT 'OPEN',
+                          sell_order_id BIGINT,
+                          sell_order_time_ms BIGINT,
+                          sell_price NUMERIC,
+                          sell_time TIMESTAMPTZ,
+                          sell_time_ms BIGINT,
+                          fee_usdt NUMERIC,
+                          net_profit_usdt NUMERIC
+                        );
                         """
                     )
 
@@ -112,9 +113,6 @@ class BTCDB:
             self._migrate_schema()
             # orders: client_order_id 추가
             self._add_col_if_missing("btc_orders", "client_order_id", "TEXT")
-            # pool_position updated_at 보장
-            self._add_col_if_missing("btc_pool_position", "updated_at", "TIMESTAMPTZ DEFAULT now()")
-
         finally:
             conn.close()
 
@@ -177,6 +175,21 @@ class BTCDB:
 
         # settings
         self._add_col_if_missing("btc_settings", "updated_at", "TIMESTAMPTZ DEFAULT now()")
+
+        # lots
+        self._add_col_if_missing("btc_lots", "symbol", "TEXT NOT NULL DEFAULT ''")
+        self._add_col_if_missing("btc_lots", "buy_price", "NUMERIC NOT NULL DEFAULT 0")
+        self._add_col_if_missing("btc_lots", "buy_btc_qty", "NUMERIC NOT NULL DEFAULT 0")
+        self._add_col_if_missing("btc_lots", "buy_time", "TIMESTAMPTZ DEFAULT now()")
+        self._add_col_if_missing("btc_lots", "buy_time_ms", "BIGINT")
+        self._add_col_if_missing("btc_lots", "status", "TEXT DEFAULT 'OPEN'")
+        self._add_col_if_missing("btc_lots", "sell_order_id", "BIGINT")
+        self._add_col_if_missing("btc_lots", "sell_order_time_ms", "BIGINT")
+        self._add_col_if_missing("btc_lots", "sell_price", "NUMERIC")
+        self._add_col_if_missing("btc_lots", "sell_time", "TIMESTAMPTZ")
+        self._add_col_if_missing("btc_lots", "sell_time_ms", "BIGINT")
+        self._add_col_if_missing("btc_lots", "fee_usdt", "NUMERIC")
+        self._add_col_if_missing("btc_lots", "net_profit_usdt", "NUMERIC")
 
     def _pick_order_col(self, table: str, candidates: List[str]) -> Optional[str]:
         cols = self._table_columns(table)
@@ -464,6 +477,135 @@ class BTCDB:
         finally:
             conn.close()
 
+    # -----------------------------
+    # lots
+    # -----------------------------
+    def insert_lot(
+        self,
+        *,
+        symbol: str,
+        buy_price: float,
+        buy_btc_qty: float,
+        buy_time_ms: int | None = None,
+        status: str = "OPEN",
+    ) -> int:
+        conn = self.get_connection()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO btc_lots(
+                          symbol, buy_price, buy_btc_qty, buy_time_ms, status
+                        )
+                        VALUES (%s,%s,%s,%s,%s)
+                        RETURNING lot_id
+                        """,
+                        (
+                            symbol,
+                            float(buy_price),
+                            float(buy_btc_qty),
+                            int(buy_time_ms) if buy_time_ms is not None else None,
+                            status,
+                        ),
+                    )
+                    row = cur.fetchone()
+                    return int(row["lot_id"])
+        finally:
+            conn.close()
+
+    def get_open_lots(self, symbol: str) -> List[Dict[str, Any]]:
+        conn = self.get_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM btc_lots
+                    WHERE symbol=%s AND status='OPEN'
+                    ORDER BY COALESCE(buy_time_ms, 0) ASC, lot_id ASC
+                    """,
+                    (symbol,),
+                )
+                return cur.fetchall() or []
+        finally:
+            conn.close()
+
+    def close_lot(
+        self,
+        *,
+        lot_id: int,
+        sell_price: float,
+        sell_time_ms: int | None = None,
+        fee_usdt: float = 0.0,
+        net_profit_usdt: float = 0.0,
+        status: str = "CLOSED",
+    ):
+        conn = self.get_connection()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE btc_lots
+                        SET status=%s,
+                            sell_price=%s,
+                            sell_time=now(),
+                            sell_time_ms=%s,
+                            fee_usdt=%s,
+                            net_profit_usdt=%s
+                        WHERE lot_id=%s
+                        """,
+                        (
+                            status,
+                            float(sell_price),
+                            int(sell_time_ms) if sell_time_ms is not None else None,
+                            float(fee_usdt),
+                            float(net_profit_usdt),
+                            int(lot_id),
+                        ),
+                    )
+        finally:
+            conn.close()
+
+    def set_lot_sell_order(self, *, lot_id: int, order_id: int, order_time_ms: int | None = None):
+        conn = self.get_connection()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE btc_lots
+                        SET sell_order_id=%s,
+                            sell_order_time_ms=%s
+                        WHERE lot_id=%s
+                        """,
+                        (
+                            int(order_id),
+                            int(order_time_ms) if order_time_ms is not None else None,
+                            int(lot_id),
+                        ),
+                    )
+        finally:
+            conn.close()
+
+    def clear_lot_sell_order(self, *, lot_id: int):
+        conn = self.get_connection()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE btc_lots
+                        SET sell_order_id=NULL,
+                            sell_order_time_ms=NULL
+                        WHERE lot_id=%s
+                        """,
+                        (int(lot_id),),
+                    )
+        finally:
+            conn.close()
+
     def get_position(self, symbol: str) -> PositionSnapshot:
         conn = self.get_connection()
         try:
@@ -487,128 +629,5 @@ class BTCDB:
                     avg_entry=float(row["avg_entry"]),
                     updated_at=str(row["updated_at"]),
                 )
-        finally:
-            conn.close()
-
-
-    def recompute_pool_position_from_fills(self, symbol: str, client_prefix: str = "BTCSTACK_") -> PositionSnapshot:
-        """
-        ✅ 봇 주문(client_order_id prefix)로 발생한 fills만 모아서 pool 포지션 계산.
-        fills에는 clientOrderId가 없으니, fills.order_id -> orders.client_order_id로 조인해서 필터링.
-        """
-        sql = """
-            SELECT f.side, f.price, f.qty, f.quote_qty
-            FROM btc_fills f
-            JOIN btc_orders o ON o.order_id = f.order_id
-            WHERE f.symbol=%s
-            AND o.client_order_id LIKE %s
-            ORDER BY COALESCE(f.trade_time_ms, 0) ASC, f.trade_id ASC
-        """
-        conn = self.get_connection()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(sql, (symbol, f"{client_prefix}%"))
-                rows = cur.fetchall() or []
-
-            qty = 0.0
-            cost = 0.0
-
-            for r in rows:
-                side = (r.get("side") or "").upper()
-                q = float(r.get("qty") or 0.0)
-                quote = float(r.get("quote_qty") or (float(r.get("price") or 0.0) * q))
-                if q <= 0:
-                    continue
-
-                if side == "BUY":
-                    qty += q
-                    cost += quote
-                else:  # SELL
-                    if qty <= 1e-12:
-                        continue
-                    avg = cost / qty if qty > 0 else 0.0
-                    sell_q = min(q, qty)
-                    qty -= sell_q
-                    cost -= avg * sell_q
-                    if qty <= 1e-12:
-                        qty = 0.0
-                        cost = 0.0
-
-            avg_entry = (cost / qty) if qty > 0 else 0.0
-            snap = PositionSnapshot(
-                symbol=symbol,
-                btc_qty=float(qty),
-                cost_basis_usdt=float(cost),
-                avg_entry=float(avg_entry),
-                updated_at=datetime.utcnow().isoformat(),
-            )
-
-            # upsert pool snapshot
-            conn2 = self.get_connection()
-            try:
-                with conn2:
-                    with conn2.cursor() as cur2:
-                        cur2.execute(
-                            """
-                            INSERT INTO btc_pool_position(symbol, btc_qty, cost_basis_usdt, avg_entry, updated_at)
-                            VALUES (%s,%s,%s,%s,now())
-                            ON CONFLICT (symbol)
-                            DO UPDATE SET
-                            btc_qty=EXCLUDED.btc_qty,
-                            cost_basis_usdt=EXCLUDED.cost_basis_usdt,
-                            avg_entry=EXCLUDED.avg_entry,
-                            updated_at=now()
-                            """,
-                            (snap.symbol, snap.btc_qty, snap.cost_basis_usdt, snap.avg_entry),
-                        )
-            finally:
-                conn2.close()
-
-            return snap
-        finally:
-            conn.close()
-
-
-    def get_pool_position(self, symbol: str) -> PositionSnapshot:
-        conn = self.get_connection()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT symbol, btc_qty, cost_basis_usdt, avg_entry, updated_at
-                    FROM btc_pool_position
-                    WHERE symbol=%s
-                    """,
-                    (symbol,),
-                )
-                row = cur.fetchone()
-                if not row:
-                    return self.recompute_pool_position_from_fills(symbol)
-
-                return PositionSnapshot(
-                    symbol=row["symbol"],
-                    btc_qty=float(row["btc_qty"]),
-                    cost_basis_usdt=float(row["cost_basis_usdt"]),
-                    avg_entry=float(row["avg_entry"]),
-                    updated_at=str(row["updated_at"]),
-                )
-        finally:
-            conn.close()
-
-    # -----------------------------
-    # AI
-    # -----------------------------  
-    def insert_ai_event(self, kind: str, symbol: str, payload: Dict[str, Any]):
-        conn = self.get_connection()
-        try:
-            with conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        INSERT INTO btc_ai_events(kind, symbol, payload)
-                        VALUES (%s, %s, %s)
-                        """,
-                        (kind, symbol, json.dumps(payload)),
-                    )
         finally:
             conn.close()
