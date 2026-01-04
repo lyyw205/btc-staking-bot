@@ -1,4 +1,7 @@
 .env
-.env.*artifacts/
+.env.*
+artifacts/
 /.venv/
 backtest_equity.csv
+__pycache__/
+*.pyc
